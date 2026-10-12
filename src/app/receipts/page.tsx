@@ -2,7 +2,8 @@
 
 import { useAuth } from '@/lib/auth-context';
 import { OrderApi } from '@/lib/api';
-import { ArrowRight, Loader2, Printer, Receipt, RefreshCw, X } from 'lucide-react';
+import { createReceiptPdf } from '@/lib/receipt-pdf';
+import { ArrowRight, Download, Loader2, Receipt, RefreshCw, X } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -177,11 +178,39 @@ function parseOrdersFromBody(body: unknown): OrderRecord[] {
 }
 
 function ReceiptModal({ order, onClose }: { order: OrderRecord; onClose: () => void }) {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const items = order.order_items ?? [];
   const total = Number(order.total_amount || 0);
   const vat = vatFromInclusiveTotal(total);
   const currency = order.currency || 'USD';
   const isPaid = (order.payment_status || order.status || '').toLowerCase() === 'paid';
+
+  function downloadReceipt() {
+    setDownloadError(null);
+    try {
+      const pdf = createReceiptPdf({
+        orderId: order.id,
+        brand: MERCHANT.brand,
+        merchant: MERCHANT.legalName,
+        tin: MERCHANT.tin,
+        address: MERCHANT.address,
+        status: isPaid ? 'Paid' : statusLabel(order.payment_status || order.status),
+        date: formatFullDateTime(order.paid_at ?? order.created_at),
+        items: items.map((item) => ({
+          description: `Data ${formatItemData(item)}${item.validity_days ? `, ${item.validity_days} days` : ''}`,
+          amount: `${item.currency ?? currency} ${Number(item.price).toFixed(2)}`,
+        })),
+        total: `${currency} ${total.toFixed(2)}`,
+        vat: `${currency} ${vat.toFixed(2)}`,
+        vatRate: `${(VAT_RATE * 100).toFixed(0)}%`,
+        orderReference: orderRefFor(order),
+        paymentId: paymentIdFor(order),
+      });
+      pdf.save(`Travela-receipt-${order.id}.pdf`);
+    } catch {
+      setDownloadError('Could not download your receipt. Please try again.');
+    }
+  }
 
   return (
     <div
@@ -287,13 +316,16 @@ function ReceiptModal({ order, onClose }: { order: OrderRecord; onClose: () => v
 
         <button
           type="button"
-          onClick={() => window.print()}
+          onClick={downloadReceipt}
           className="print:hidden mt-6 w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold text-white hover:opacity-90"
           style={{ backgroundColor: '#112116' }}
         >
-          <Printer size={16} />
-          Download / Save as PDF
+          <Download size={16} />
+          Download PDF
         </button>
+        {downloadError && (
+          <p role="alert" className="mt-3 text-sm text-red-600">{downloadError}</p>
+        )}
       </div>
 
       <style jsx global>{`
