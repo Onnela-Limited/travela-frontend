@@ -19,6 +19,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useLayoutEffect, useState } from 'react';
+import NationalitySelect from '@/components/checkout/NationalitySelect';
 import LegalAcceptance from '@/components/legal/LegalAcceptance';
 import { AuthApi, extractAuthTokenFromBody, OrderApi } from '@/lib/api';
 import { AUTH_STORAGE_SYNC } from '@/lib/auth-context';
@@ -70,52 +71,6 @@ const KYC_PLACEHOLDER = {
   gender: 'Other' as const,
   reason_for_travel: 'Tourism' as const,
 };
-
-const NATIONALITIES = [
-  'Tanzanian',
-  'Kenyan',
-  'Ugandan',
-  'Rwandan',
-  'Burundian',
-  'Congolese',
-  'South African',
-  'Nigerian',
-  'Ghanaian',
-  'Ethiopian',
-  'Egyptian',
-  'Moroccan',
-  'American',
-  'British',
-  'Canadian',
-  'Australian',
-  'German',
-  'French',
-  'Italian',
-  'Spanish',
-  'Dutch',
-  'Belgian',
-  'Swiss',
-  'Swedish',
-  'Norwegian',
-  'Danish',
-  'Finnish',
-  'Irish',
-  'Portuguese',
-  'Polish',
-  'Russian',
-  'Turkish',
-  'Indian',
-  'Chinese',
-  'Japanese',
-  'Korean',
-  'Emirati',
-  'Saudi',
-  'Israeli',
-  'Brazilian',
-  'Mexican',
-  'Argentine',
-  'Other',
-] as const;
 
 type Step = 'register' | 'otp' | 'payment' | 'success';
 
@@ -668,12 +623,13 @@ export default function CheckoutPage() {
     emailOverride?: string;
     orderId?: string | number;
     draftId?: string;
-    paymentUrl?: string;
+    paymentUrl?: string | null;
   }) => {
     const payEmail = (opts.emailOverride ?? email).trim();
     const snapshot = {
       order_id: opts.orderId,
       draft_id: opts.draftId ?? orderDraftId,
+      payment_url: opts.paymentUrl ?? undefined,
       items: [{ bundle: cart.bundle, quantity: 1 }],
       trip: {
         countryName: cart.countryName,
@@ -685,10 +641,11 @@ export default function CheckoutPage() {
             : undefined,
       },
       simType: cart.simType,
+      country: cart.country,
+      countryName: cart.countryName,
       total,
       currency,
       email: payEmail,
-      payment_url: opts.paymentUrl,
       createdAt: new Date().toISOString(),
     };
     localStorage.setItem('pendingPayment', JSON.stringify(snapshot));
@@ -1126,20 +1083,11 @@ export default function CheckoutPage() {
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5 block">
                   Nationality <span className="text-red-400">*</span>
                 </label>
-                <select
+                <NationalitySelect
                   value={nationality}
-                  onChange={(e) => setNationality(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm text-slate-800 bg-white focus:outline-none focus:border-slate-400"
-                >
-                  <option value="" disabled>
-                    Select your nationality
-                  </option>
-                  {NATIONALITIES.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setNationality}
+                  placeholder="Select your nationality"
+                />
               </div>
 
               <div>

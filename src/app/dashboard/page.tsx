@@ -15,11 +15,12 @@ import { useAuth } from '@/lib/auth-context';
 import { getBalancePollContext } from '@/lib/balance-poll';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
-import { extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
+import { resolvePaymentTargetUrl, extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
 import { useBalancePoll } from '@/hooks/useBalancePoll';
 import {
   CheckCircle,
   Clock,
+  CreditCard,
   Download,
   Globe,
   Info,
@@ -63,13 +64,15 @@ interface PurchaseData {
 interface PendingPaymentData {
   order_id?: string | number;
   draft_id?: string;
+  payment_url?: string;
   simType?: string;
+  country?: string;
+  countryName?: string;
   items?: PurchaseData['items'];
   trip?: PurchaseData['trip'];
   total?: number;
   currency?: string;
   email?: string;
-  payment_url?: string;
 }
 
 interface OrderItemRecord {
@@ -91,11 +94,7 @@ interface OrderRecord {
   currency: string;
   paid_at: string | null;
   created_at: string;
-  payment_payload?: {
-    response?: {
-      paymentUrl?: string | null;
-    };
-  } | null;
+  payment_payload?: { response?: { paymentUrl?: string | null } } | null;
   metadata?: {
     countryName?: string;
     simType?: string;
@@ -490,6 +489,48 @@ function isPaidOrder(order: OrderRecord): boolean {
   return status === 'paid' || status === 'completed';
 }
 
+/** Order was started but payment is still pending, failed, or abandoned — user can pay again. */
+function isUnpaidPayableOrder(order: OrderRecord): boolean {
+  if (isPaidOrder(order)) return false;
+  if (order.paid_at) return false;
+  const status = (order.payment_status || order.status || '').toLowerCase();
+  const unpaid = new Set([
+    'pending',
+    'pending_payment',
+    'unpaid',
+    'failed',
+    'payment_failed',
+    'cancelled',
+    'canceled',
+    'expired',
+    'awaiting_payment',
+    'payment_required',
+    'initiated',
+    'created',
+    'draft',
+  ]);
+  return unpaid.has(status) || !status;
+}
+
+function findLatestUnpaidOrder(orders: OrderRecord[]): OrderRecord | null {
+  return (
+    orders
+      .filter(isUnpaidPayableOrder)
+      .sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      )[0] ?? null
+  );
+}
+
+function unpaidStatusLabel(status?: string | null) {
+  const s = (status ?? 'pending').toLowerCase();
+  if (s.includes('fail')) return 'Payment failed';
+  if (s.includes('cancel')) return 'Payment cancelled';
+  if (s.includes('expir')) return 'Payment expired';
+  return 'Payment pending';
+}
+
 function checkoutUrlFromOrder(order: OrderRecord | null | undefined): string | null {
   const payload = order?.payment_payload;
   if (!payload || typeof payload !== 'object') return null;
@@ -519,8 +560,8 @@ function formatOrderItemData(mb?: number | null) {
 
 function resolvePhysicalPickupDetails(
   orders: OrderRecord[],
-  pendingPayment: PendingPaymentData | null,
-  purchase: PurchaseData | null
+  _pendingPayment: PendingPaymentData | null,
+  _purchase: PurchaseData | null
 ): PhysicalPickupDetails | null {
   const apiOrder = orders
     .filter((o) => o.metadata?.simType === 'physical' && isPaidOrder(o))
@@ -560,37 +601,8 @@ function resolvePhysicalPickupDetails(
     };
   }
 
-  const localSource = pendingPayment?.simType === 'physical' ? pendingPayment : null;
-  const purchaseSource =
-    !localSource && purchase?.simType === 'physical' ? purchase : null;
-  const source = localSource ?? purchaseSource;
-  if (!source) return null;
-
-  const items =
-    source.items?.map((item) => ({
-      name: item.bundle.name,
-      dataLabel: formatOrderItemData(item.bundle.data_mb),
-      validityDays: item.bundle.validity_days,
-      price:
-        item.bundle.price != null
-          ? Number(item.bundle.price).toFixed(2)
-          : undefined,
-      currency: item.bundle.currency ?? source.currency,
-    })) ?? [];
-
-  const validityDays = items[0]?.validityDays ?? 30;
-  return {
-    draftId: localSource?.draft_id ?? purchase?.draftId,
-    orderId: localSource?.order_id ?? purchase?.orderId,
-    countryName: source.trip?.countryName,
-    deactivationDate:
-      source.trip?.departureDate ??
-      deactivationIsoFrom(source.trip?.arrivalDate ?? purchase?.date, validityDays),
-    items,
-    total: source.total != null ? Number(source.total).toFixed(2) : undefined,
-    currency: source.currency,
-    status: 'paid',
-  };
+  // Unpaid local pendingPayment / lastPurchase must not unlock pickup UI.
+  return null;
 }
 
 function hasPhysicalSimPurchase(
@@ -645,15 +657,13 @@ export default function DashboardPage() {
   const [waitingForSim, setWaitingForSim] = useState(false);
   const [esimsError, setEsimsError] = useState('');
   const [showQrCode, setShowQrCode] = useState(false);
-  const [assignPrompt, setAssignPrompt] = useState<'assign' | 'activate' | null>(null);
+  const [assignPrompt, setAssignPrompt] = useState(false);
   const [promptActivationDate, setPromptActivationDate] = useState<string | null>(null);
   const [promptOrderId, setPromptOrderId] = useState<number | null>(null);
-  const [promptUserEsimId, setPromptUserEsimId] = useState<number | null>(null);
-  const [promptQr, setPromptQr] = useState<string | null>(null);
-  const [promptMsisdn, setPromptMsisdn] = useState<string | null>(null);
   const [assigningSim, setAssigningSim] = useState(false);
   const [promptError, setPromptError] = useState('');
   const [extendDate, setExtendDate] = useState('');
+  const datePromptDismissedRef = useRef(false);
   const [topUpModalOpen, setTopUpModalOpen] = useState(false);
   const [topUpModalShown, setTopUpModalShown] = useState(false);
   const [topUpModalClosing, setTopUpModalClosing] = useState(false);
@@ -661,9 +671,8 @@ export default function DashboardPage() {
   const [topUpBundlesLoading, setTopUpBundlesLoading] = useState(false);
   const [showReceiptPrompt, setShowReceiptPrompt] = useState(false);
   const [receiptOrderId, setReceiptOrderId] = useState<string | null>(null);
-  const [openingPayment, setOpeningPayment] = useState(false);
-  const [paymentOpenError, setPaymentOpenError] = useState('');
-  const [resolvedCheckoutUrl, setResolvedCheckoutUrl] = useState<string | null>(null);
+  const [retryPaying, setRetryPaying] = useState(false);
+  const [retryPayError, setRetryPayError] = useState('');
   const ordersRef = useRef(orders);
   const purchaseRef = useRef(purchase);
 
@@ -715,11 +724,18 @@ export default function DashboardPage() {
       setUserEsims(parsed.esims);
       setLatestOrderBundle(parsed.latestOrderBundle);
       if (parsed.assignmentPrompt?.status === 'awaiting_confirmation' && parsed.esims.length === 0) {
-        setPromptActivationDate(parsed.assignmentPrompt.activation_date ?? null);
+        const activationIso = parsed.assignmentPrompt.activation_date ?? null;
+        setPromptActivationDate(activationIso);
         setPromptOrderId(parsed.assignmentPrompt.order_id ?? null);
-        setAssignPrompt((current) => (current === 'activate' ? 'activate' : 'assign'));
-      } else if (parsed.assignmentPrompt?.status === 'scheduled' && parsed.esims.length === 0) {
-        setAssignPrompt((current) => (current === 'activate' ? 'activate' : null));
+        if (activationIso) {
+          setExtendDate(activationIso.slice(0, 10));
+        }
+        if (!datePromptDismissedRef.current) {
+          setAssignPrompt(true);
+        }
+      } else {
+        datePromptDismissedRef.current = false;
+        setAssignPrompt(false);
       }
     } catch (e: unknown) {
       const fallback =
@@ -746,36 +762,9 @@ export default function DashboardPage() {
     []
   );
 
-  const handleAssignNow = async () => {
-    setAssigningSim(true);
-    setPromptError('');
-    try {
-      const res = await EsimsApi.register();
-      const status = parseAssignmentStatus(res.body);
-      const body = res.body as { data?: { id?: number; esim?: EsimAssignmentPayload['esim'] } } | null;
-      const userEsimId = body?.data?.id;
-      if ((res.ok || res.status === 201) && status.has_sim && typeof userEsimId === 'number') {
-        const payload: EsimAssignmentPayload = status.data ?? { esim: body?.data?.esim };
-        applyAssignedSim(payload);
-        setPromptUserEsimId(userEsimId);
-        setPromptQr(payload.esim?.qr_code_data ?? null);
-        setPromptMsisdn(payload.esim?.msisdn ?? payload.esim?.phone_number ?? null);
-        setAssignPrompt('activate');
-        await loadEsims();
-        await loadOrders();
-        return;
-      }
-      setPromptError(apiErrorMessage(res.body, 'Could not assign a number yet. Try again shortly.'));
-    } catch (e: unknown) {
-      setPromptError(e instanceof Error ? e.message : 'Could not assign a number.');
-    } finally {
-      setAssigningSim(false);
-    }
-  };
-
   const handleExtendActivationDate = async () => {
     if (!extendDate || !promptOrderId) {
-      setPromptError('Choose a later eSIM activation date.');
+      setPromptError('Choose a valid eSIM activation date.');
       return;
     }
     setAssigningSim(true);
@@ -789,7 +778,8 @@ export default function DashboardPage() {
         setPromptError(apiErrorMessage(res.body, 'Could not update the eSIM activation date.'));
         return;
       }
-      setAssignPrompt(null);
+      datePromptDismissedRef.current = true;
+      setAssignPrompt(false);
       setExtendDate('');
       await loadOrders();
       await loadEsims();
@@ -799,6 +789,118 @@ export default function DashboardPage() {
       setAssigningSim(false);
     }
   };
+
+  const dismissAssignPrompt = () => {
+    datePromptDismissedRef.current = true;
+    setAssignPrompt(false);
+    setPromptError('');
+  };
+
+  const handleRetryPayment = useCallback(async () => {
+    setRetryPayError('');
+    setRetryPaying(true);
+    const paymentTab = window.open('about:blank', '_blank');
+    if (paymentTab) paymentTab.opener = null;
+    try {
+      if (!paymentTab) throw new Error('Could not open the payment page. Allow pop-ups and try again.');
+      const unpaidOrder = findLatestUnpaidOrder(orders);
+      const pending = pendingPayment ?? readPendingPaymentFromStorage();
+
+      const orderId = unpaidOrder?.id ?? pending?.order_id;
+      if (orderId == null) {
+        throw new Error('No unpaid order found. Start checkout again from bundles.');
+      }
+
+      const draftId = unpaidOrder?.draft_id ?? pending?.draft_id;
+      const amount = unpaidOrder
+        ? Number(unpaidOrder.total_amount)
+        : Number(pending?.total ?? 0);
+      const currency = unpaidOrder?.currency ?? pending?.currency ?? 'USD';
+      const email =
+        (typeof user?.email === 'string' ? user.email : '') ||
+        pending?.email ||
+        '';
+      const country =
+        unpaidOrder?.metadata?.country ?? pending?.country ?? 'TZ';
+      const countryName =
+        unpaidOrder?.metadata?.countryName ??
+        unpaidOrder?.trip?.destination_country ??
+        pending?.countryName ??
+        pending?.trip?.countryName ??
+        'Tanzania';
+      const simType =
+        unpaidOrder?.metadata?.simType ?? pending?.simType ?? 'esim';
+
+      let paymentUrl = normalizePaymentUrl(checkoutUrlFromOrder(unpaidOrder)) ??
+        (String(pending?.order_id) === String(orderId) ? normalizePaymentUrl(pending?.payment_url) : null);
+      if (!paymentUrl) {
+        const res = await OrderApi.evpayCheckoutUrl(orderId);
+        if (res.ok) paymentUrl = normalizePaymentUrl(extractPaymentUrl(res.body));
+      }
+      const targetUrl = resolvePaymentTargetUrl(paymentUrl, {
+        amount: Number.isFinite(amount) ? amount : 0,
+        currency,
+        email,
+        country,
+        countryName,
+        simType,
+        orderId,
+        draftId,
+      });
+
+      // Keep pending snapshot so the dashboard can keep offering retry until paid.
+      const snapshot = {
+        order_id: orderId,
+        draft_id: draftId,
+        payment_url: targetUrl,
+        items:
+          pending?.items ??
+          unpaidOrder?.order_items?.map((item) => ({
+            bundle: {
+              name: item.bundle_name,
+              data_mb: item.data_amount ?? undefined,
+              validity_days: item.validity_days,
+              price: item.price,
+              currency: item.currency,
+            },
+            quantity: 1,
+          })),
+        trip: pending?.trip ?? {
+          countryName,
+          arrivalDate: unpaidOrder?.trip?.arrival_date,
+          departureDate: unpaidOrder?.trip?.departure_date,
+          duration: unpaidOrder?.trip?.duration_days,
+        },
+        simType,
+        country,
+        countryName,
+        total: Number.isFinite(amount) ? amount : pending?.total,
+        currency,
+        email,
+        createdAt: new Date().toISOString(),
+      };
+      localStorage.setItem('pendingPayment', JSON.stringify(snapshot));
+      setPendingPayment(snapshot);
+
+      try {
+        sessionStorage.setItem('travela:showReceiptPrompt', '1');
+        sessionStorage.setItem('travela:receiptOrderId', String(orderId));
+      } catch {
+        /* ignore */
+      }
+      setShowReceiptPrompt(true);
+      setReceiptOrderId(String(orderId));
+
+      paymentTab.location.href = targetUrl;
+    } catch (e: unknown) {
+      paymentTab?.close();
+      setRetryPayError(
+        e instanceof Error ? e.message : 'Could not restart payment. Try again.'
+      );
+    } finally {
+      setRetryPaying(false);
+    }
+  }, [orders, pendingPayment, user?.email]);
 
   useEffect(() => {
     if (!topUpModalOpen) return;
@@ -893,7 +995,8 @@ export default function DashboardPage() {
       const simType =
         activeEsim?.esim?.sim_type === 'physical' ? 'physical' : 'esim';
 
-      const currentDataMb = dataMbFromAssignment(activeEsim);
+      const currentDataMb =
+        dataMbFromAssignment(activeEsim) ?? 0;
 
       localStorage.setItem(
         'cart',
@@ -905,7 +1008,7 @@ export default function DashboardPage() {
           checkoutMode: 'topup',
           user_esim_id: activeEsim.id,
           msisdn,
-          ...(currentDataMb != null ? { current_data_mb: currentDataMb } : {}),
+          current_data_mb: currentDataMb,
         })
       );
       sessionStorage.setItem(CHECKOUT_TRANSITION_KEY, 'topup-modal');
@@ -968,72 +1071,7 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!isAuthenticated) return;
     void loadOrders();
-    void loadEsims();
-  }, [isAuthenticated, loadOrders, loadEsims]);
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-
-    const matched =
-      orders.find((order) => receiptOrderId && String(order.id) === String(receiptOrderId)) ??
-      orders.find(
-        (order) =>
-          pendingPayment?.order_id != null && String(order.id) === String(pendingPayment.order_id)
-      ) ??
-      null;
-    const paid = matched ? isPaidOrder(matched) : false;
-    const pending = !paid && (showReceiptPrompt || pendingPayment != null);
-    if (!pending) {
-      setResolvedCheckoutUrl(null);
-      setOpeningPayment(false);
-      return;
-    }
-
-    const known = normalizePaymentUrl(
-      pendingPayment?.payment_url ?? checkoutUrlFromOrder(matched ?? orders.find((order) => !isPaidOrder(order)))
-    );
-    if (known) {
-      setResolvedCheckoutUrl(known);
-      setPaymentOpenError('');
-      setOpeningPayment(false);
-      return;
-    }
-
-    const orderId =
-      pendingPayment?.order_id ??
-      (receiptOrderId || null) ??
-      matched?.id ??
-      orders.find((order) => !isPaidOrder(order))?.id ??
-      null;
-    if (orderId == null) return;
-
-    let cancelled = false;
-    setOpeningPayment(true);
-    setPaymentOpenError('');
-
-    void (async () => {
-      try {
-        const res = await OrderApi.evpayCheckoutUrl(orderId);
-        const url = normalizePaymentUrl(extractPaymentUrl(res.body));
-        if (cancelled) return;
-        if (!res.ok || !url) {
-          setPaymentOpenError(apiErrorMessage(res.body, 'Could not open the payment page.'));
-          return;
-        }
-        setResolvedCheckoutUrl(url);
-      } catch (e: unknown) {
-        if (!cancelled) {
-          setPaymentOpenError(e instanceof Error ? e.message : 'Could not open the payment page.');
-        }
-      } finally {
-        if (!cancelled) setOpeningPayment(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isAuthenticated, showReceiptPrompt, pendingPayment, receiptOrderId, orders]);
+  }, [isAuthenticated, loadOrders]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -1080,7 +1118,14 @@ export default function DashboardPage() {
 
           const status = parseAssignmentStatus(statusRes.body);
           const pendingPay = readPendingPaymentFromStorage();
-          const justPaid = Boolean(pendingPay || getBalancePollContext());
+          const pendingOrderPaid = Boolean(
+            pendingPay?.order_id &&
+              ordersRef.current.some(
+                (o) => String(o.id) === String(pendingPay.order_id) && isPaidOrder(o)
+              )
+          );
+          // pendingPayment alone means checkout started — not that money cleared.
+          const justPaid = Boolean(getBalancePollContext() || pendingOrderPaid);
           const isPhysicalPurchase =
             pendingPay?.simType === 'physical' ||
             hasPhysicalSimPurchase(ordersRef.current, pendingPay, purchaseRef.current);
@@ -1091,17 +1136,31 @@ export default function DashboardPage() {
             return;
           }
 
-          if (status.status === 'awaiting_confirmation') {
-            setPromptActivationDate(status.activation_date ?? null);
-            setPromptOrderId(status.order_id ?? null);
-            setAssignPrompt((current) => (current === 'activate' ? 'activate' : 'assign'));
+          if (status.status === 'payment_required' && !pendingOrderPaid) {
             setWaitingForSim(false);
             setAssignmentLoading(false);
             return;
           }
 
+          if (status.status === 'awaiting_confirmation') {
+            const activationIso = status.activation_date ?? null;
+            setPromptActivationDate(activationIso);
+            setPromptOrderId(status.order_id ?? null);
+            if (activationIso) {
+              setExtendDate(activationIso.slice(0, 10));
+            }
+            if (!datePromptDismissedRef.current) {
+              setAssignPrompt(true);
+            }
+            setWaitingForSim(false);
+            setAssignmentLoading(false);
+            return;
+          }
+
+          datePromptDismissedRef.current = false;
+          setAssignPrompt(false);
+
           if (status.status === 'scheduled') {
-            setAssignPrompt((current) => (current === 'activate' ? 'activate' : null));
             setWaitingForSim(false);
             setAssignmentLoading(false);
             return;
@@ -1202,6 +1261,44 @@ export default function DashboardPage() {
         new Date(b.paid_at ?? b.created_at).getTime() -
         new Date(a.paid_at ?? a.created_at).getTime()
     )[0];
+  const latestUnpaidOrder = findLatestUnpaidOrder(orders);
+  const pendingOrderIsPaid = Boolean(
+    pendingPayment?.order_id &&
+      orders.some(
+        (o) => String(o.id) === String(pendingPayment.order_id) && isPaidOrder(o)
+      )
+  );
+  const pendingNeedsPayment = Boolean(
+    pendingPayment &&
+      !pendingOrderIsPaid &&
+      (pendingPayment.order_id == null ||
+        !orders.some(
+          (o) => String(o.id) === String(pendingPayment.order_id) && isPaidOrder(o)
+        ))
+  );
+  const incompletePaymentOrder = latestUnpaidOrder;
+  const needsPaymentRetry = Boolean(incompletePaymentOrder || pendingNeedsPayment);
+  const incompletePaymentLabel = unpaidStatusLabel(
+    incompletePaymentOrder?.payment_status || incompletePaymentOrder?.status || 'pending'
+  );
+  const incompleteBundleName =
+    displayBundleName(
+      incompletePaymentOrder?.order_items?.[0]?.bundle_name ??
+        pendingPayment?.items?.[0]?.bundle?.name ??
+        purchase?.items?.[0]?.bundle?.name ??
+        null
+    ) || 'your plan';
+  const incompleteAmount =
+    incompletePaymentOrder?.total_amount != null
+      ? Number(incompletePaymentOrder.total_amount)
+      : pendingPayment?.total ?? purchase?.total ?? null;
+  const incompleteCurrency =
+    incompletePaymentOrder?.currency ??
+    pendingPayment?.currency ??
+    purchase?.currency ??
+    'USD';
+  const incompleteOrderId =
+    incompletePaymentOrder?.id ?? pendingPayment?.order_id ?? purchase?.orderId ?? null;
   const apiBundle = primaryUserEsim?.bundle ?? latestOrderBundle ?? null;
 
   const assignedMsisdn =
@@ -1253,7 +1350,18 @@ export default function DashboardPage() {
     coerceNumber(latestPaidOrder?.order_items?.[0]?.data_amount) ??
     coerceNumber(apiBundle?.data_mb) ??
     null;
-  const displayDataMb = confirmedDataMb ?? carrierDataMb ?? purchasedPlanMb;
+  const displayDataMb =
+    confirmedDataMb ??
+    carrierDataMb ??
+    purchasedPlanMb;
+
+  const balanceStatusSub = confirmedDataMb != null || carrierDataMb != null
+    ? 'Live data remaining'
+    : balancePolling || waitingForSim
+      ? 'Confirming with the network'
+      : purchasedPlanMb != null
+        ? 'Purchased data'
+        : 'Waiting for data balance';
 
   const simType = primaryUserEsim?.esim?.sim_type ?? assignedSim?.esim?.sim_type ?? purchase?.simType ?? pendingPayment?.simType ?? 'esim';
   const isEsimType = simType.toLowerCase() !== 'physical';
@@ -1265,14 +1373,7 @@ export default function DashboardPage() {
     Boolean(assignedMsisdn) || userEsims.length > 0;
   const hasPurchasedPlan =
     hasActiveEsim ||
-    Boolean(pendingPayment && pendingPayment.simType !== 'physical') ||
-    Boolean(purchase && purchase.simType !== 'physical') ||
     Boolean(latestPaidOrder && latestPaidOrder.metadata?.simType !== 'physical');
-  const simStatusDisplay = !hasActiveEsim && hasPurchasedPlan
-    ? 'Setting up'
-    : isEsimType
-      ? esimDeviceStatusLabel(primaryUserEsim, simStatus)
-      : simStatusLabel(simStatus);
   const simTypeTitle = simTypeLabel(simType);
 
   const physicalPickupDetails = resolvePhysicalPickupDetails(
@@ -1291,29 +1392,6 @@ export default function DashboardPage() {
     ) ??
     null;
   const receiptOrderPaid = matchedReceiptOrder ? isPaidOrder(matchedReceiptOrder) : false;
-  const paymentPending =
-    !receiptOrderPaid && (showReceiptPrompt || pendingPayment != null);
-  const pendingOrder =
-    matchedReceiptOrder ??
-    orders.find((order) => !isPaidOrder(order)) ??
-    null;
-  const pendingCheckoutUrl = paymentPending
-    ? normalizePaymentUrl(pendingPayment?.payment_url ?? checkoutUrlFromOrder(pendingOrder))
-    : null;
-  const showEsimSetup =
-    waitingForSim && receiptOrderPaid && !hasActiveEsim && !isPhysicalSimAwaitingPickup;
-  const planStatusLabel =
-    paymentPending && !hasActiveEsim ? 'Payment pending' : simStatusDisplay;
-  const balanceStatusLabel =
-    confirmedDataMb != null || carrierDataMb != null
-      ? 'Live data remaining'
-      : paymentPending
-        ? 'Payment pending'
-        : receiptOrderPaid && (balancePolling || waitingForSim)
-          ? 'Confirming with the network'
-          : purchasedPlanMb != null
-            ? 'Purchased data'
-            : 'Waiting for data balance';
   const receiptBundleName =
     matchedReceiptOrder?.order_items?.[0]?.bundle_name ??
     pendingPayment?.items?.[0]?.bundle?.name ??
@@ -1369,6 +1447,43 @@ export default function DashboardPage() {
   const daysRemaining = simIsActive ? daysUntil(deactivationIso) : null;
   const daysRemainingLabel = daysLeftLabel(daysRemaining);
 
+  const todayPart = toDatePart(new Date().toISOString());
+  const activationDay = toDatePart(scheduledActivationIso);
+  /** Plan window ended — user cannot use this SIM anymore. */
+  const isPlanExpired = Boolean(simIsActive && daysRemaining != null && daysRemaining < 0);
+  /**
+   * Purchased with a future activation date — number/activation details stay hidden
+   * until that day; only purchase confirmation + receipt for now.
+   */
+  const isReservedFuture = Boolean(
+    hasPurchasedPlan &&
+      !simIsActive &&
+      !isPlanExpired &&
+      activationDay &&
+      todayPart &&
+      activationDay > todayPart
+  );
+  const daysUntilActivation = isReservedFuture ? daysUntil(scheduledActivationIso) : null;
+  const activationCountdownLabel =
+    daysUntilActivation == null
+      ? null
+      : daysUntilActivation <= 0
+        ? 'today'
+        : daysUntilActivation === 1
+          ? 'tomorrow'
+          : `in ${daysUntilActivation} days`;
+
+  const planLifecycleLabel = isPlanExpired
+    ? 'Expired'
+    : isReservedFuture
+      ? 'Scheduled'
+      : !hasActiveEsim && hasPurchasedPlan
+        ? 'Setting up'
+        : isEsimType
+          ? esimDeviceStatusLabel(primaryUserEsim, simStatus)
+          : simStatusLabel(simStatus);
+  const simStatusDisplay = planLifecycleLabel;
+
   const purchasedDataMb = orders
     .filter(isPaidOrder)
     .flatMap((o) => o.order_items ?? [])
@@ -1397,29 +1512,20 @@ export default function DashboardPage() {
         ? 0
         : Math.min(100, Math.max(4, Math.round((remainingMb / bundleTotalMb) * 100)));
 
-  const checkoutHref = pendingCheckoutUrl || resolvedCheckoutUrl;
-
   return (
     <div className="min-h-screen" style={{ backgroundColor: '#f6f8f6' }}>
-      {assignPrompt && (
+      {assignPrompt && !isPlanExpired && (
         <AssignSimPrompt
-          step={assignPrompt}
           activationDateLabel={formatTripDate(promptActivationDate)}
-          assigning={assigningSim}
+          currentActivationIso={promptActivationDate ? promptActivationDate.slice(0, 10) : null}
+          saving={assigningSim}
           error={promptError}
           extendDate={extendDate}
           minExtendDate={addDaysToIso(new Date().toISOString().slice(0, 10), 1)}
-          userEsimId={promptUserEsimId}
-          qrCodeData={promptQr}
-          msisdn={promptMsisdn}
           onExtendDateChange={setExtendDate}
-          onAssign={() => void handleAssignNow()}
-          onExtend={() => void handleExtendActivationDate()}
-          onActivated={() => {
-            setAssignPrompt(null);
-            void loadEsims();
-          }}
-          onClose={() => setAssignPrompt(null)}
+          onSaveDate={() => void handleExtendActivationDate()}
+          onConfirm={dismissAssignPrompt}
+          onClose={dismissAssignPrompt}
         />
       )}
       {/* Header bar */}
@@ -1446,31 +1552,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {paymentPending ? (
-        <div className="bg-amber-50 border-b border-amber-100 px-4 py-3">
-          <div className="max-w-5xl mx-auto flex flex-wrap items-center gap-3">
-            <p className="text-sm text-amber-900 flex items-center gap-2">
-              <Clock size={16} className="shrink-0" />
-              Payment is pending. Finish payment in the other tab, or try again if it failed. Your eSIM is set up only after payment goes through.
-            </p>
-            {checkoutHref ? (
-              <a
-                href={checkoutHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm font-semibold text-amber-950 underline underline-offset-2 hover:text-amber-800"
-              >
-                Continue to payment
-              </a>
-            ) : openingPayment ? (
-              <span className="text-sm text-amber-800">Loading payment link…</span>
-            ) : null}
-            {paymentOpenError ? (
-              <p className="w-full text-xs font-semibold text-amber-950">{paymentOpenError}</p>
-            ) : null}
-          </div>
-        </div>
-      ) : balancePolling && receiptOrderPaid ? (
+      {balancePolling ? (
         <div className="bg-emerald-50 border-b border-emerald-100 px-4 py-3">
           <p className="max-w-5xl mx-auto text-sm text-emerald-800 flex items-center gap-2">
             <Loader2 size={16} className="shrink-0 animate-spin" />
@@ -1572,7 +1654,81 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {showReceiptPrompt && (
+        {needsPaymentRetry && (
+          <div className="rounded-2xl border border-amber-200 bg-white overflow-hidden shadow-sm">
+            <div
+              className="px-5 py-4 flex items-start justify-between gap-3"
+              style={{ backgroundColor: 'rgba(245,158,11,0.12)' }}
+            >
+              <div className="flex items-start gap-3 min-w-0">
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                  style={{ backgroundColor: '#112116', color: 'white' }}
+                >
+                  <CreditCard size={18} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-extrabold text-slate-900">{incompletePaymentLabel}</p>
+                  <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                    Your order was started but payment is not complete yet. Pay again for this order
+                    — once it clears, your number will appear here automatically.
+                  </p>
+                </div>
+              </div>
+              <span
+                className="text-[11px] font-extrabold px-2.5 py-1 rounded-full flex-shrink-0"
+                style={{ backgroundColor: 'rgba(146,64,14,0.12)', color: '#92400e' }}
+              >
+                Unpaid
+              </span>
+            </div>
+            <div className="px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Order</p>
+                <p className="text-sm font-extrabold text-slate-900 truncate">{incompleteBundleName}</p>
+                {incompleteAmount != null && (
+                  <p className="text-sm font-bold mt-0.5" style={{ color: '#112116' }}>
+                    {incompleteCurrency} {Number(incompleteAmount).toFixed(2)}
+                  </p>
+                )}
+                {incompleteOrderId != null && (
+                  <p className="text-xs text-slate-400 mt-1">Order #{incompleteOrderId}</p>
+                )}
+                {retryPayError && (
+                  <p className="text-xs font-medium text-red-600 mt-2">{retryPayError}</p>
+                )}
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => void handleRetryPayment()}
+                  disabled={retryPaying}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold text-white hover:opacity-90 disabled:opacity-60"
+                  style={{ backgroundColor: '#112116' }}
+                >
+                  {retryPaying ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" /> Opening payment…
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard size={16} /> Complete payment
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void loadOrders()}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50"
+                >
+                  Refresh status
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showReceiptPrompt && !needsPaymentRetry && (
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
             <div
               className="px-5 py-4 flex items-start justify-between gap-3"
@@ -1587,12 +1743,12 @@ export default function DashboardPage() {
                 </div>
                 <div className="min-w-0">
                   <p className="text-sm font-extrabold text-slate-900">
-                    {receiptOrderPaid ? 'Payment received' : 'Payment is pending'}
+                    {receiptOrderPaid ? 'Payment received' : 'After you finish payment'}
                   </p>
                   <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
                     {receiptOrderPaid
                       ? 'Download your Travela receipt with plan and payment details.'
-                      : 'Payment has not been confirmed yet. Finish it in the other tab, or try again if it failed. You can download your Travela receipt once payment goes through.'}
+                      : 'Complete payment in the other tab, then come back here. You can download your Travela receipt once payment is confirmed.'}
                   </p>
                 </div>
               </div>
@@ -1637,7 +1793,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {showEsimSetup && (
+        {waitingForSim && !hasActiveEsim && !isPhysicalSimAwaitingPickup && (
           <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 flex items-start gap-3">
             <Loader2 size={20} className="animate-spin text-sky-600 flex-shrink-0 mt-0.5" />
             <div>
@@ -1780,12 +1936,203 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {assignmentLoading && !hasActiveEsim && !waitingForSim && !hasPurchasedPlan && !isPhysicalSimAwaitingPickup ? (
+        {assignmentLoading && !hasActiveEsim && !waitingForSim && !hasPurchasedPlan && !isPhysicalSimAwaitingPickup && !needsPaymentRetry ? (
           <div className="rounded-2xl p-12 flex items-center justify-center bg-white border border-slate-100">
             <Loader2 size={28} className="animate-spin text-slate-400" />
           </div>
         ) : hasActiveEsim || hasPurchasedPlan ? (
           <>
+            {/* Future activation — reserved: receipt only, no number / activate details yet */}
+            {isReservedFuture ? (
+              <div className="space-y-4">
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                  <div
+                    className="px-5 py-4 flex items-start justify-between gap-3"
+                    style={{ backgroundColor: 'rgba(17,33,22,0.06)' }}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">
+                        Your purchase
+                      </p>
+                      <h2 className="text-lg font-extrabold text-slate-900">eSIM scheduled</h2>
+                      <p className="text-sm text-slate-600 mt-2 leading-relaxed">
+                        Your plan is set to activate on{' '}
+                        <span className="font-extrabold text-slate-900">
+                          {formatTripDate(scheduledActivationIso)}
+                        </span>
+                        {activationCountdownLabel ? (
+                          <>
+                            {' '}
+                            (
+                            <span className="font-semibold text-slate-800">
+                              {activationCountdownLabel}
+                            </span>
+                            )
+                          </>
+                        ) : null}
+                        . Your Travela number stays reserved until then — install steps unlock on
+                        that day.
+                      </p>
+                    </div>
+                    <span
+                      className="text-xs font-extrabold px-3 py-1.5 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: 'rgba(17,33,22,0.12)', color: '#112116' }}
+                    >
+                      Scheduled
+                    </span>
+                  </div>
+
+                  <div className="px-5 py-4 border-t border-slate-100">
+                    <div className="min-w-0 mb-4">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Plan</p>
+                      <p className="text-sm font-extrabold text-slate-900 truncate">{esimTitle}</p>
+                      <p className="text-xs text-slate-500 mt-1">
+                        {planValidityDays}-day plan · activates{' '}
+                        {formatTripDate(scheduledActivationIso)}
+                      </p>
+                    </div>
+
+                    <div
+                      className="rounded-xl px-4 py-4"
+                      style={{ backgroundColor: 'rgba(17,33,22,0.04)' }}
+                    >
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-3 flex items-center gap-1.5">
+                        <Clock size={13} />
+                        What happens next
+                      </p>
+                      <ol className="space-y-3">
+                        <li className="flex gap-3 text-sm text-slate-700 leading-relaxed">
+                          <span
+                            className="flex-shrink-0 w-6 h-6 rounded-full text-[11px] font-extrabold flex items-center justify-center text-white"
+                            style={{ backgroundColor: '#112116' }}
+                          >
+                            1
+                          </span>
+                          <span>
+                            <span className="font-semibold text-slate-900">Until activation day</span>
+                            {' — '}
+                            nothing to install yet. Keep this account signed in and watch for our
+                            email with your QR code and setup steps.
+                          </span>
+                        </li>
+                        <li className="flex gap-3 text-sm text-slate-700 leading-relaxed">
+                          <span
+                            className="flex-shrink-0 w-6 h-6 rounded-full text-[11px] font-extrabold flex items-center justify-center text-white"
+                            style={{ backgroundColor: '#112116' }}
+                          >
+                            2
+                          </span>
+                          <span>
+                            <span className="font-semibold text-slate-900">
+                              On {formatTripDate(scheduledActivationIso)}
+                            </span>
+                            {' — '}
+                            open this dashboard. Your Travela number and install instructions
+                            (Activate eSIM / QR) will appear here so you can set up on your phone.
+                          </span>
+                        </li>
+                        <li className="flex gap-3 text-sm text-slate-700 leading-relaxed">
+                          <span
+                            className="flex-shrink-0 w-6 h-6 rounded-full text-[11px] font-extrabold flex items-center justify-center text-white"
+                            style={{ backgroundColor: '#112116' }}
+                          >
+                            3
+                          </span>
+                          <span>
+                            <span className="font-semibold text-slate-900">After install</span>
+                            {' — '}
+                            turn on the eSIM line and enable{' '}
+                            <span className="font-semibold">Data Roaming</span>. Your{' '}
+                            {planValidityDays}-day data plan starts from activation.
+                          </span>
+                        </li>
+                      </ol>
+                    </div>
+
+                    <Link
+                      href={receiptHref}
+                      className="mt-4 w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold text-white hover:opacity-90"
+                      style={{ backgroundColor: '#112116' }}
+                    >
+                      <Download size={16} />
+                      View purchase receipt
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            ) : isPlanExpired ? (
+              /* Expired — clear, non-usable state */
+              <div className="space-y-4">
+                <div className="sim-card-shape p-4 sm:p-6 pt-7 sm:pt-8 text-white opacity-95">
+                  <div className="flex items-start justify-between gap-3 mb-5 flex-wrap">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                      <div className="sim-chip mt-5 opacity-60" aria-hidden>
+                        <span /><span /><span /><span /><span /><span />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          {isEsimType ? (
+                            <Wifi size={14} className="text-white/40" />
+                          ) : (
+                            <Smartphone size={14} className="text-white/40" />
+                          )}
+                          <p className="text-xs font-bold uppercase tracking-widest text-white/40">
+                            {simTypeTitle}
+                          </p>
+                        </div>
+                        {assignedMsisdn && (
+                          <h2 className="text-2xl sm:text-3xl font-black tracking-tight break-all leading-tight text-white/80">
+                            {formatMsisdn(assignedMsisdn)}
+                          </h2>
+                        )}
+                        <p className="text-base font-black text-white/80 mt-1">{esimTitle}</p>
+                        <p className="text-sm font-semibold mt-2 text-white/55">
+                          This plan has ended and can no longer be used.
+                        </p>
+                        {formatTripDate(deactivationIso) && (
+                          <p className="text-xs font-semibold mt-2 text-white/45">
+                            Ended {formatTripDate(deactivationIso)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <span
+                      className="text-xs font-extrabold px-3 py-1.5 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: 'rgba(248,113,113,0.25)', color: '#fecaca' }}
+                    >
+                      Expired
+                    </span>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-extrabold text-slate-900">Need data again?</p>
+                    <p className="text-sm text-slate-500 mt-1">
+                      Top up or buy a new plan to stay connected.
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Link
+                      href={receiptHref}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50"
+                    >
+                      <Receipt size={16} />
+                      Receipt
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => setTopUpModalOpen(true)}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold text-white hover:opacity-90"
+                      style={{ backgroundColor: '#112116' }}
+                    >
+                      Top Up
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Activation instructions — shown first so users know what the buttons below do */}
             {isEsimType && hasActiveEsim && !primaryUserEsim?.device_activated_at && (
               <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6">
@@ -1870,16 +2217,6 @@ export default function DashboardPage() {
                     <p className="text-sm font-semibold mt-1" style={{ color: '#17cf54' }}>
                       Valid for {planValidityDays} days
                     </p>
-                    {!simIsActive && formatTripDate(scheduledActivationIso) && (
-                      <div className="mt-3">
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-white/50">
-                          Scheduled activation
-                        </p>
-                        <p className="text-sm font-bold mt-0.5" style={{ color: '#17cf54' }}>
-                          {formatTripDate(scheduledActivationIso)}
-                        </p>
-                      </div>
-                    )}
                     {purchase?.trip?.countryName && (
                       <p className="text-sm font-semibold mt-2 text-white/80">{purchase.trip.countryName}</p>
                     )}
@@ -1893,7 +2230,7 @@ export default function DashboardPage() {
                       : { backgroundColor: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.8)' }
                   }
                 >
-                  {planStatusLabel}
+                  {simStatusDisplay}
                 </span>
               </div>
 
@@ -2048,15 +2385,13 @@ export default function DashboardPage() {
                   ),
                   label: 'SIM Type',
                   value: simTypeTitle,
-                  sub: isEsimType
-                    ? esimDeviceStatusLabel(primaryUserEsim, simStatus)
-                    : simStatusLabel(simStatus),
+                  sub: simStatusDisplay,
                 },
                 {
                   icon: <Globe size={16} style={{ color: '#17cf54' }} />,
                   label: 'Balance',
                   value: balanceAreaValue,
-                  sub: balanceStatusLabel,
+                  sub: balanceStatusSub,
                 },
                 {
                   icon: <Clock size={16} style={{ color: '#17cf54' }} />,
@@ -2113,8 +2448,10 @@ export default function DashboardPage() {
                 </p>
               </div>
             )}
+              </>
+            )}
           </>
-        ) : isPhysicalSimAwaitingPickup ? null : (
+        ) : isPhysicalSimAwaitingPickup || needsPaymentRetry ? null : (
           /* Empty state */
           <div className="bg-white rounded-2xl border border-slate-100 p-10 text-center">
             <div
