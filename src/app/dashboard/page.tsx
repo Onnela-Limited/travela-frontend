@@ -13,6 +13,7 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { getBalancePollContext } from '@/lib/balance-poll';
+import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
 import { resolvePaymentTargetUrl, extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
@@ -214,6 +215,8 @@ interface UserEsimRecord {
   balance_fetched_at?: string | null;
   balances?: Record<string, unknown> | null;
   device_activated_at?: string | null;
+  plan_started_at?: string | null;
+  plan_expires_at?: string | null;
   activation_email_sent_at?: string | null;
   created_at?: string | null;
   esim?: EsimDetail | null;
@@ -661,6 +664,8 @@ export default function DashboardPage() {
   const [promptActivationDate, setPromptActivationDate] = useState<string | null>(null);
   const [promptOrderId, setPromptOrderId] = useState<number | null>(null);
   const [assigningSim, setAssigningSim] = useState(false);
+  const confirmationInFlightRef = useRef(false);
+  const [rechargeNotice, setRechargeNotice] = useState('');
   const [promptError, setPromptError] = useState('');
   const [extendDate, setExtendDate] = useState('');
   const datePromptDismissedRef = useRef(false);
@@ -723,6 +728,7 @@ export default function DashboardPage() {
       const parsed = parseEsimsFromBody(res.body);
       setUserEsims(parsed.esims);
       setLatestOrderBundle(parsed.latestOrderBundle);
+      setWaitingForSim(parsed.assignmentPrompt?.status === 'activation_pending');
       if (parsed.assignmentPrompt?.status === 'awaiting_confirmation' && parsed.esims.length === 0) {
         const activationIso = parsed.assignmentPrompt.activation_date ?? null;
         setPromptActivationDate(activationIso);
@@ -794,6 +800,62 @@ export default function DashboardPage() {
     datePromptDismissedRef.current = true;
     setAssignPrompt(false);
     setPromptError('');
+  };
+
+  const handleConfirmActivationDate = async () => {
+    if (confirmationInFlightRef.current || assigningSim) return;
+    confirmationInFlightRef.current = true;
+    setAssigningSim(true);
+    setPromptError('');
+    setRechargeNotice('');
+    let numberAssigned = false;
+    try {
+      const res = await EsimsApi.register();
+      if (!res.ok) {
+        throw new Error(apiErrorMessage(res.body, 'Could not set up your eSIM. Please try again.'));
+      }
+      const result = parseAssignmentStatus(res.body);
+      if (!result.has_sim) {
+        if (result.status === 'scheduled') {
+          datePromptDismissedRef.current = true;
+          setAssignPrompt(false);
+          await loadOrders();
+          await loadEsims();
+          return;
+        }
+        const message = result.status === 'waiting_for_inventory'
+          ? 'No eSIM numbers are available yet. Please try confirming again shortly.'
+          : result.status === 'payment_required'
+            ? 'Your payment has not been confirmed yet. Complete payment, then try again.'
+            : apiErrorMessage(res.body, 'Your eSIM has not been assigned yet. Please try again.');
+        setPromptError(message);
+        return;
+      }
+
+      numberAssigned = true;
+      applyAssignedSim(result.data);
+      datePromptDismissedRef.current = true;
+      setAssignPrompt(false);
+      setWaitingForSim(false);
+      setAssignmentLoading(false);
+      localStorage.removeItem('pendingPayment');
+      setPendingPayment(null);
+
+      const body = res.body as { recharge?: { recharge_status?: string; failed?: number } } | null;
+      const recharge = body?.recharge;
+      if (recharge?.recharge_status !== 'success' || (recharge.failed ?? 0) > 0) {
+        setRechargeNotice('Your number is assigned, but your data is not confirmed ready yet. You can retry data setup below.');
+      }
+      await loadOrders();
+      await loadEsims();
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Could not set up your eSIM. Please try again.';
+      if (numberAssigned || !assignPrompt) setRechargeNotice(message);
+      else setPromptError(message);
+    } finally {
+      confirmationInFlightRef.current = false;
+      setAssigningSim(false);
+    }
   };
 
   const handleRetryPayment = useCallback(async () => {
@@ -919,7 +981,7 @@ export default function DashboardPage() {
               sim_bundle_id: b.sim_bundle_id ?? null,
               name: displayBundleName(b.alias?.trim() || fallbackBundleName(dataMb) || b.name),
               data_mb: dataMb,
-              validity_days: b.validity_days ?? undefined,
+              validity_days: PLAN_VALIDITY_DAYS,
               price: b.price ?? b.price_usd ?? undefined,
               currency: b.currency ?? undefined,
               tagline: bundleTagline(b.validity_days, dataMb),
@@ -1079,12 +1141,19 @@ export default function DashboardPage() {
     const refreshEsims = () => void loadEsims();
     window.addEventListener('focus', refreshEsims);
     window.addEventListener('pageshow', refreshEsims);
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadEsims();
+        void loadOrders();
+      }
+    }, 30_000);
 
     return () => {
       window.removeEventListener('focus', refreshEsims);
       window.removeEventListener('pageshow', refreshEsims);
+      window.clearInterval(refreshTimer);
     };
-  }, [isAuthenticated, loadEsims]);
+  }, [isAuthenticated, loadEsims, loadOrders]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -1160,8 +1229,8 @@ export default function DashboardPage() {
           datePromptDismissedRef.current = false;
           setAssignPrompt(false);
 
-          if (status.status === 'scheduled') {
-            setWaitingForSim(false);
+          if (status.status === 'scheduled' || status.status === 'activation_pending') {
+            setWaitingForSim(status.status === 'activation_pending');
             setAssignmentLoading(false);
             return;
           }
@@ -1423,41 +1492,27 @@ export default function DashboardPage() {
     (assignedMsisdn ? formatMsisdn(assignedMsisdn) : null) ??
     'eSIM';
 
-  const planValidityDays =
-    coerceNumber(latestPaidOrder?.order_items?.[0]?.validity_days) ??
-    coerceNumber(apiBundle?.validity_days) ??
-    coerceNumber(pendingBundle?.validity_days) ??
-    coerceNumber(primaryBundle?.validity_days) ??
-    30;
+  const planValidityDays = PLAN_VALIDITY_DAYS;
   const scheduledActivationIso =
-    purchase?.trip?.arrivalDate ?? latestPaidOrder?.trip?.arrival_date ?? null;
-  const planStartIso = simIsActive
-    ? (primaryUserEsim?.device_activated_at ??
-      scheduledActivationIso ??
-      primaryUserEsim?.created_at ??
-      latestPaidOrder?.paid_at ??
-      latestPaidOrder?.created_at ??
-      null)
-    : scheduledActivationIso;
-  const deactivationIso = simIsActive
-    ? deactivationIsoFrom(planStartIso, planValidityDays)
-    : (purchase?.trip?.departureDate ??
-      latestPaidOrder?.trip?.departure_date ??
-      deactivationIsoFrom(scheduledActivationIso, planValidityDays));
-  const daysRemaining = simIsActive ? daysUntil(deactivationIso) : null;
+    latestPaidOrder?.trip?.arrival_date ?? purchase?.trip?.arrivalDate ?? null;
+  const planStartIso = primaryUserEsim?.plan_started_at ?? null;
+  const confirmedExpiryIso = primaryUserEsim?.plan_expires_at ?? null;
+  const deactivationIso = confirmedExpiryIso ??
+    (scheduledActivationIso ? plannedExpiryDate(scheduledActivationIso.slice(0, 10)) : null);
+  const daysRemaining = confirmedExpiryIso ? daysUntil(confirmedExpiryIso) : null;
   const daysRemainingLabel = daysLeftLabel(daysRemaining);
 
-  const todayPart = toDatePart(new Date().toISOString());
+  const todayPart = activationToday();
   const activationDay = toDatePart(scheduledActivationIso);
   /** Plan window ended — user cannot use this SIM anymore. */
-  const isPlanExpired = Boolean(simIsActive && daysRemaining != null && daysRemaining < 0);
+  const isPlanExpired = hasPlanExpired(confirmedExpiryIso);
   /**
    * Purchased with a future activation date — number/activation details stay hidden
    * until that day; only purchase confirmation + receipt for now.
    */
   const isReservedFuture = Boolean(
     hasPurchasedPlan &&
-      !simIsActive &&
+      !planStartIso &&
       !isPlanExpired &&
       activationDay &&
       todayPart &&
@@ -1479,6 +1534,8 @@ export default function DashboardPage() {
       ? 'Scheduled'
       : !hasActiveEsim && hasPurchasedPlan
         ? 'Setting up'
+        : isEsimType && hasActiveEsim && !planStartIso
+          ? 'Preparing data'
         : isEsimType
           ? esimDeviceStatusLabel(primaryUserEsim, simStatus)
           : simStatusLabel(simStatus);
@@ -1521,10 +1578,10 @@ export default function DashboardPage() {
           saving={assigningSim}
           error={promptError}
           extendDate={extendDate}
-          minExtendDate={addDaysToIso(new Date().toISOString().slice(0, 10), 1)}
+          minExtendDate={addDaysToIso(activationToday(), 1)}
           onExtendDateChange={setExtendDate}
           onSaveDate={() => void handleExtendActivationDate()}
-          onConfirm={dismissAssignPrompt}
+          onConfirm={() => void handleConfirmActivationDate()}
           onClose={dismissAssignPrompt}
         />
       )}
@@ -1626,7 +1683,7 @@ export default function DashboardPage() {
                         <p className="text-xs text-slate-500">{bundle.tagline}</p>
                       )}
                       <p className="text-xs text-slate-500 mt-1">
-                        {bundle.validity_days ?? 30} days · {bundle.currency ?? 'USD'}{' '}
+                        {PLAN_VALIDITY_DAYS} days · {bundle.currency ?? 'USD'}{' '}
                         {Number(bundle.price ?? 0).toFixed(2)}
                       </p>
                     </div>
@@ -1648,6 +1705,19 @@ export default function DashboardPage() {
       )}
 
       <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+        {rechargeNotice && (
+          <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p>{rechargeNotice}</p>
+            <button
+              type="button"
+              onClick={() => void handleConfirmActivationDate()}
+              disabled={assigningSim}
+              className="mt-2 font-bold underline disabled:opacity-60"
+            >
+              {assigningSim ? 'Setting up data…' : 'Retry data setup'}
+            </button>
+          </div>
+        )}
         {esimsError && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             {esimsError}
@@ -1793,7 +1863,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {waitingForSim && !hasActiveEsim && !isPhysicalSimAwaitingPickup && (
+        {(waitingForSim || (isEsimType && hasActiveEsim && !planStartIso)) && !isPhysicalSimAwaitingPickup && (
           <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 flex items-start gap-3">
             <Loader2 size={20} className="animate-spin text-sky-600 flex-shrink-0 mt-0.5" />
             <div>
@@ -1801,7 +1871,7 @@ export default function DashboardPage() {
                 Payment received. We&apos;re setting up your eSIM.
               </p>
               <p className="text-xs text-sky-700 mt-1">
-                Your plan is ready below. Number and live balance will appear here shortly.
+                Assignment and data setup run automatically. Your installation QR will appear when data is ready.
               </p>
             </div>
           </div>
@@ -1970,8 +2040,7 @@ export default function DashboardPage() {
                             )
                           </>
                         ) : null}
-                        . Your Travela number stays reserved until then — install steps unlock on
-                        that day.
+                        . At 00:01 Tanzania time that day, we will assign your number and load your data automatically, then email your installation QR.
                       </p>
                     </div>
                     <span
@@ -2043,7 +2112,7 @@ export default function DashboardPage() {
                             {' — '}
                             turn on the eSIM line and enable{' '}
                             <span className="font-semibold">Data Roaming</span>. Your{' '}
-                            {planValidityDays}-day data plan starts from activation.
+                            {planValidityDays}-day data plan starts from successful recharge.
                           </span>
                         </li>
                       </ol>
@@ -2134,7 +2203,7 @@ export default function DashboardPage() {
             ) : (
               <>
             {/* Activation instructions — shown first so users know what the buttons below do */}
-            {isEsimType && hasActiveEsim && !primaryUserEsim?.device_activated_at && (
+            {isEsimType && hasActiveEsim && planStartIso && !primaryUserEsim?.device_activated_at && (
               <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <Info size={18} style={{ color: '#17cf54' }} />
@@ -2142,6 +2211,9 @@ export default function DashboardPage() {
                     How to Install &amp; Activate Your eSIM
                   </h3>
                 </div>
+                <p className="mb-4 text-sm font-semibold text-slate-700">
+                  Your eSIM number is already assigned and your data is ready. All you need to do is install your eSIM using the QR code or installation button below.
+                </p>
                 {[
                   {
                     num: '1',
@@ -2234,7 +2306,7 @@ export default function DashboardPage() {
                 </span>
               </div>
 
-              {simIsActive && (formatTripDate(planStartIso) || formatTripDate(deactivationIso)) && (
+              {planStartIso && confirmedExpiryIso && (
                 <div className="flex items-end justify-between gap-6 mb-4">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-white/50">
@@ -2288,7 +2360,7 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {isEsimType && primaryUserEsim?.id && (
+              {isEsimType && primaryUserEsim?.id && planStartIso && (
                 <div
                   className={
                     !primaryUserEsim.device_activated_at && hasActivationData
@@ -2314,7 +2386,7 @@ export default function DashboardPage() {
                     onShowQr={() => setShowQrCode(true)}
                   />
 
-                  {!primaryUserEsim.device_activated_at && hasActivationData && (
+                  {!primaryUserEsim.device_activated_at && hasActivationData && Boolean(planStartIso) && (
                     <button
                       type="button"
                       onClick={() => setShowQrCode((v) => !v)}
@@ -2329,7 +2401,7 @@ export default function DashboardPage() {
               {isEsimType &&
                 primaryUserEsim?.id &&
                 !primaryUserEsim.device_activated_at &&
-                hasActivationData &&
+                hasActivationData && Boolean(planStartIso) &&
                 showQrCode && (
                   <div>
                     <QrCodePanel
@@ -2343,7 +2415,7 @@ export default function DashboardPage() {
 
               {isEsimType &&
                 !primaryUserEsim?.device_activated_at &&
-                hasActivationData &&
+                hasActivationData && Boolean(planStartIso) &&
                 user?.email && (
                   <p className="mt-4 text-sm text-white/70 leading-relaxed text-center px-1">
                     {activationEmailSentAt ? (
@@ -2396,12 +2468,12 @@ export default function DashboardPage() {
                 {
                   icon: <Clock size={16} style={{ color: '#17cf54' }} />,
                   label: 'Duration',
-                  value: simIsActive
+                  value: confirmedExpiryIso
                     ? (daysRemainingLabel ?? planValidityLabel)
                     : `Valid for ${planValidityDays} days`,
-                  sub: simIsActive
+                  sub: confirmedExpiryIso
                     ? formatTripDate(deactivationIso)
-                      ? `Valid for ${planValidityDays} days · Deactivates ${formatTripDate(deactivationIso)}`
+                      ? `Valid for ${planValidityDays} days · Expires ${formatTripDate(confirmedExpiryIso)}`
                       : `Valid for ${planValidityDays} days`
                     : formatTripDate(scheduledActivationIso)
                       ? `Activates ${formatTripDate(scheduledActivationIso)}`
