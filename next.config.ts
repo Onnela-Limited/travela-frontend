@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 
+const isDevelopment = process.env.NODE_ENV === "development";
+
 /** Security headers applied to every response. */
 const securityHeaders = [
   // Prevent the site from being embedded in iframes (clickjacking protection)
@@ -29,7 +31,8 @@ const securityHeaders = [
       "default-src 'self'",
       // Scripts: only same-origin (Next.js bundles). Remove 'unsafe-inline'
       // once next.js removes inline scripts (they use nonces in newer versions).
-      "script-src 'self' 'unsafe-inline'",
+      // React's development debugger requires eval; production keeps it blocked.
+      `script-src 'self' 'unsafe-inline'${isDevelopment ? " 'unsafe-eval'" : ""}`,
       // Styles: inline styles are used heavily by Tailwind
       "style-src 'self' 'unsafe-inline'",
       // Images: allow data URIs and our own origin
