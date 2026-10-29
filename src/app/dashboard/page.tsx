@@ -1863,7 +1863,10 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {(waitingForSim || (isEsimType && hasActiveEsim && !planStartIso)) && !isPhysicalSimAwaitingPickup && (
+        {latestPaidOrder &&
+          !needsPaymentRetry &&
+          (waitingForSim || (isEsimType && hasActiveEsim && !planStartIso)) &&
+          !isPhysicalSimAwaitingPickup && (
           <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 flex items-start gap-3">
             <Loader2 size={20} className="animate-spin text-sky-600 flex-shrink-0 mt-0.5" />
             <div>
