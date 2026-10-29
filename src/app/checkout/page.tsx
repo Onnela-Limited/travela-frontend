@@ -22,7 +22,7 @@ import { useEffect, useState } from 'react';
 import NationalitySelect from '@/components/checkout/NationalitySelect';
 import LegalAcceptance from '@/components/legal/LegalAcceptance';
 import { AuthApi, BundlesApi, extractAuthTokenFromBody, OrderApi } from '@/lib/api';
-import { type Bundle, type BundlesResponse, mapApiBundles } from '@/lib/bundles';
+import { isPurchasableBundle, type Bundle, type BundlesResponse, mapApiBundles } from '@/lib/bundles';
 import { AUTH_STORAGE_SYNC } from '@/lib/auth-context';
 import {
   extractPaymentUrl,
@@ -553,6 +553,15 @@ export default function CheckoutPage() {
   };
 
   const createOrderForCheckout = async (userId: number): Promise<OrderCheckoutResult> => {
+    // Carts can outlive catalog updates. Check again before opening a checkout
+    // for a plan that has since been disabled or removed.
+    const catalog = await BundlesApi.list<BundlesResponse>();
+    const selected = catalog.data?.bundles?.find(
+      (bundle) => String(bundle.id) === String(cart.bundle.id)
+    );
+    if (!selected || !isPurchasableBundle(selected)) {
+      throw new Error('This bundle is currently unavailable. Please go back and choose an available plan.');
+    }
     const payload = buildOrderPayload(userId);
     let orderRes = await OrderApi.create(payload);
 

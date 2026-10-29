@@ -13,7 +13,7 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { getBalancePollContext, getOptimisticDataMb } from '@/lib/balance-poll';
-import { displayBundleName } from '@/lib/bundles';
+import { displayBundleName, isPurchasableBundle } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
 import { resolvePaymentTargetUrl } from '@/lib/payment';
 import { useBalancePoll } from '@/hooks/useBalancePoll';
@@ -189,6 +189,7 @@ interface TopUpBundle {
 
 type ApiBundle = {
   id: number;
+  active?: boolean;
   sim_bundle_id?: number | null;
   name: string;
   alias?: string | null;
@@ -897,7 +898,7 @@ export default function DashboardPage() {
       try {
         const res = await BundlesApi.list<BundlesResponse>();
         const apiBundles = res.data?.bundles ?? [];
-        const uiBundles: TopUpBundle[] = apiBundles.map((b) => {
+        const uiBundles: TopUpBundle[] = apiBundles.filter(isPurchasableBundle).map((b) => {
             const dataMb = bundleToMb(b);
             return {
               id: b.id,
@@ -1151,6 +1152,15 @@ export default function DashboardPage() {
             setWaitingForSim(false);
             setAssignmentLoading(false);
             return;
+          }
+
+          if (status.status === 'activation_pending') {
+            setWaitingForSim(true);
+            setAssignmentLoading(false);
+            // The server prepares the number asynchronously. Keep watching until
+            // it reports an assignment instead of leaving the dashboard stuck.
+            await sleep(Math.max(1, Math.min(status.retry_after_seconds ?? 5, 30)) * 1000, signal);
+            continue;
           }
 
           if (status.has_sim) {
@@ -1786,7 +1796,11 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {waitingForSim && !hasActiveEsim && !isPhysicalSimAwaitingPickup && (
+        {waitingForSim &&
+          latestPaidOrder &&
+          !needsPaymentRetry &&
+          !hasActiveEsim &&
+          !isPhysicalSimAwaitingPickup && (
           <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 flex items-start gap-3">
             <Loader2 size={20} className="animate-spin text-sky-600 flex-shrink-0 mt-0.5" />
             <div>
