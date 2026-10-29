@@ -1789,9 +1789,12 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => void loadOrders()}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50"
+                  disabled={ordersLoading}
+                  aria-busy={ordersLoading}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
                 >
-                  Refresh status
+                  {ordersLoading && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
+                  {ordersLoading ? 'Refreshing…' : 'Refresh status'}
                 </button>
               </div>
             </div>
@@ -1854,9 +1857,12 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => void loadOrders()}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50"
+                  disabled={ordersLoading}
+                  aria-busy={ordersLoading}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
                 >
-                  Refresh status
+                  {ordersLoading && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
+                  {ordersLoading ? 'Refreshing…' : 'Refresh status'}
                 </button>
               </div>
             </div>
