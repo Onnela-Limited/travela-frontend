@@ -1609,7 +1609,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {balancePolling ? (
+      {balancePolling && latestPaidOrder && !needsPaymentRetry ? (
         <div className="bg-emerald-50 border-b border-emerald-100 px-4 py-3">
           <p className="max-w-5xl mx-auto text-sm text-emerald-800 flex items-center gap-2">
             <Loader2 size={16} className="shrink-0 animate-spin" />
