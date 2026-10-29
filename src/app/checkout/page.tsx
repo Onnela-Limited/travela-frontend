@@ -226,6 +226,7 @@ export default function CheckoutPage() {
         const defaults = defaultActivationDates();
         const withActivationDates: Cart = {
           ...parsed,
+          simType: 'esim',
           tripArrivalDate: parsed.tripArrivalDate ?? defaults.tripArrivalDate,
           tripDepartureDate: plannedExpiryDate(parsed.tripArrivalDate ?? defaults.tripArrivalDate),
         };
