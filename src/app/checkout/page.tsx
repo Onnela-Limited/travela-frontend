@@ -20,6 +20,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import NationalitySelect from '@/components/checkout/NationalitySelect';
+import PartnerReferralField from '@/components/checkout/PartnerReferralField';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, activationToday } from '@/lib/plan-validity';
 import LegalAcceptance from '@/components/legal/LegalAcceptance';
 import { AuthApi, extractAuthTokenFromBody, OrderApi } from '@/lib/api';
@@ -976,6 +977,7 @@ export default function CheckoutPage() {
       </div>
 
       <div className="max-w-3xl mx-auto px-4 py-8">
+        <PartnerReferralField />
 
         {/* ── STEP 1: REGISTER ─────────────────────────────────────────── */}
         {step === 'register' && (

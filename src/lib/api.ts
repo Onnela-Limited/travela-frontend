@@ -1,3 +1,5 @@
+import { waitForReferralChange } from './referral-client';
+
 /**
  * API client for Travela backend.
  *
@@ -338,10 +340,17 @@ export const OrderApi = {
   },
   /** POST /orders */
   create: async (payload: unknown): Promise<ApiResult> => {
+    try { await waitForReferralChange(); }
+    catch { return { ok: false, status: 422, body: { message: 'The partner code was not applied. Check it before continuing to payment.' } }; }
+    // Re-check the stored referral immediately before creating an order.
+    const referralResponse = await fetch('/api/referral', { cache: 'no-store' });
+    if (!referralResponse.ok) return toApiResult(referralResponse);
+    const referralData = await referralResponse.json();
+    const attributedPayload = { ...(payload && typeof payload === 'object' ? payload : {}), referral_code: referralData.referral?.code ?? null };
     const res = await authFetch(`${PUBLIC_API_BASE}/orders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(attributedPayload),
     });
     return toApiResult(res);
   },

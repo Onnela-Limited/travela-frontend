@@ -13,6 +13,7 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { getBalancePollContext } from '@/lib/balance-poll';
+import { findLatestUnpaidOrder, isPaidOrder, shouldRetryPendingPayment } from '@/lib/payment-retry';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
@@ -487,45 +488,6 @@ function parseOrdersFromBody(body: unknown): OrderRecord[] {
   return b.data as OrderRecord[];
 }
 
-function isPaidOrder(order: OrderRecord): boolean {
-  const status = (order.payment_status || order.status || '').toLowerCase();
-  return status === 'paid' || status === 'completed';
-}
-
-/** Order was started but payment is still pending, failed, or abandoned — user can pay again. */
-function isUnpaidPayableOrder(order: OrderRecord): boolean {
-  if (isPaidOrder(order)) return false;
-  if (order.paid_at) return false;
-  const status = (order.payment_status || order.status || '').toLowerCase();
-  const unpaid = new Set([
-    'pending',
-    'pending_payment',
-    'unpaid',
-    'failed',
-    'payment_failed',
-    'cancelled',
-    'canceled',
-    'expired',
-    'awaiting_payment',
-    'payment_required',
-    'initiated',
-    'created',
-    'draft',
-  ]);
-  return unpaid.has(status) || !status;
-}
-
-function findLatestUnpaidOrder(orders: OrderRecord[]): OrderRecord | null {
-  return (
-    orders
-      .filter(isUnpaidPayableOrder)
-      .sort(
-        (a, b) =>
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )[0] ?? null
-  );
-}
-
 function unpaidStatusLabel(status?: string | null) {
   const s = (status ?? 'pending').toLowerCase();
   if (s.includes('fail')) return 'Payment failed';
@@ -866,7 +828,8 @@ export default function DashboardPage() {
     try {
       if (!paymentTab) throw new Error('Could not open the payment page. Allow pop-ups and try again.');
       const unpaidOrder = findLatestUnpaidOrder(orders);
-      const pending = pendingPayment ?? readPendingPaymentFromStorage();
+      const cachedPending = pendingPayment ?? readPendingPaymentFromStorage();
+      const pending = shouldRetryPendingPayment(orders, cachedPending) ? cachedPending : null;
 
       const orderId = unpaidOrder?.id ?? pending?.order_id;
       if (orderId == null) {
@@ -1331,20 +1294,7 @@ export default function DashboardPage() {
         new Date(a.paid_at ?? a.created_at).getTime()
     )[0];
   const latestUnpaidOrder = findLatestUnpaidOrder(orders);
-  const pendingOrderIsPaid = Boolean(
-    pendingPayment?.order_id &&
-      orders.some(
-        (o) => String(o.id) === String(pendingPayment.order_id) && isPaidOrder(o)
-      )
-  );
-  const pendingNeedsPayment = Boolean(
-    pendingPayment &&
-      !pendingOrderIsPaid &&
-      (pendingPayment.order_id == null ||
-        !orders.some(
-          (o) => String(o.id) === String(pendingPayment.order_id) && isPaidOrder(o)
-        ))
-  );
+  const pendingNeedsPayment = shouldRetryPendingPayment(orders, pendingPayment);
   const incompletePaymentOrder = latestUnpaidOrder;
   const needsPaymentRetry = Boolean(incompletePaymentOrder || pendingNeedsPayment);
   const incompletePaymentLabel = unpaidStatusLabel(

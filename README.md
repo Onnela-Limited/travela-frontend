@@ -34,3 +34,12 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+
+## Partner referrals
+
+Local checkout uses the shared local API at http://127.0.0.1:8000/api. Run this shop on port 3002 while the admin and partner portals use 3000/3001. Restart after changing .env.local. Set the Laravel PARTNER_SHOP_URL to the actual shop origin when using a different port or deploying.
+
+The /r/CODE route validates an approved partner code, saves a first-party HttpOnly referral cookie for 30 days, and redirects to /bundles. The most recent valid link/code wins before an order is created. Invalid links do not overwrite a valid saved referral. Checkout displays an optional partner-code field with Apply and Remove controls. Saved codes are checked again immediately before order creation and by Laravel at checkout. An unavailable code must be replaced or explicitly removed.
+
+The order stores the referral ID and a code snapshot. Existing order/payment retries keep their original attribution. Referral codes do not change prices or create commissions in this feature. Codes belonging to the buyer's own partner email cannot be used for their order. No referral service receives private customer data when generating QR images.
