@@ -449,8 +449,9 @@ export const EsimsApi = {
     return toApiResult(res);
   },
   /** GET /me/esims/balance-status — poll until Vodacom balance callback is stored */
-  balanceStatus: async (params: { since: string; msisdn?: string }): Promise<ApiResult> => {
+  balanceStatus: async (params: { since: string; msisdn?: string; require_data?: boolean }): Promise<ApiResult> => {
     const qs = new URLSearchParams({ since: params.since });
+    if (params.require_data) qs.set("require_data", "1");
     if (params.msisdn) qs.set("msisdn", params.msisdn);
     const res = await authFetch(`${PUBLIC_API_BASE}/me/esims/balance-status?${qs.toString()}`);
     return toApiResult(res);

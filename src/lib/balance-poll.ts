@@ -78,13 +78,6 @@ export function initBalancePollFromUrl() {
   const hasPurchaseHint = params.get('await_balance') === '1' || params.has('purchased_mb');
   if (!hasPurchaseHint) return;
 
-  const urlMsisdn = params.get('msisdn') || undefined;
-  if (!getBalancePollContext()) {
-    startBalancePoll({ msisdn: urlMsisdn });
-    return;
-  }
-
-  if (urlMsisdn) {
-    writeStored(AWAIT_MSISDN_KEY, urlMsisdn);
-  }
+  // Every email/checkout return requests a fresh balance, including on another device.
+  startBalancePoll({ msisdn: params.get('msisdn') || undefined });
 }

@@ -1,5 +1,13 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Top-up balances and bundle history
+
+The dashboard shows the carrier's combined remaining DATA balance and lists confirmed purchases, customer top-ups and admin top-ups for the selected number. It does not add purchased package sizes to a balance that already includes those packages. Each bundle keeps its own expiry date; historical expired packages remain visible without increasing the active purchased allowance.
+
+Recharge confirmation emails open the dashboard with `await_balance=1` and `msisdn`. These parameters survive login. Once authenticated, the dashboard selects that assigned number and polls for a fresh DATA balance. The balance-status API requests a carrier refresh when needed and rejects numbers outside the signed-in account. Pending and failed recharges do not appear as added bundles.
+
+Deploy the matching API services and migrations `2026_11_02_000001_create_customer_bundle_recharges.php` and `2026_11_02_000002_add_bundle_details_to_customer_recharges.php` before deploying this dashboard. Run the frontend regression checks with `node --experimental-strip-types --test tests/bundle-topup.test.mjs`.
+
 ## Getting Started
 
 First, run the development server:

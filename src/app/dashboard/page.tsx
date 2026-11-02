@@ -1,6 +1,8 @@
 'use client';
 
 import ActivateEsimButton from '@/components/esim/ActivateEsimButton';
+import BundleHistory from '@/components/esim/BundleHistory';
+import { dashboardDataMb, selectDashboardSim, type BundleHistoryEntry } from '@/lib/bundle-summary';
 import AssignSimPrompt from '@/components/esim/AssignSimPrompt';
 import QrCodePanel from '@/components/esim/QrCodePanel';
 import {
@@ -210,6 +212,8 @@ type BundlesResponse = { bundles: ApiBundle[] };
 
 interface UserEsimRecord {
   id: number;
+  bundle_history?: BundleHistoryEntry[];
+  active_bundles_data_mb?: number;
   esim_id: number;
   balance?: string | null;
   balance_currency?: string | null;
@@ -717,7 +721,8 @@ export default function DashboardPage() {
   const loadEsimsRef = useRef(loadEsims);
   loadEsimsRef.current = loadEsims;
 
-  const { isPolling: balancePolling, confirmedDataMb } = useBalancePoll({
+  const { isPolling: balancePolling, confirmedDataMb, targetMsisdn } = useBalancePoll({
+    enabled: isAuthenticated && !isLoading,
     onBalanceReady: () => {
       void loadEsimsRef.current();
     },
@@ -1001,7 +1006,7 @@ export default function DashboardPage() {
     (bundle: TopUpBundle) => {
       if (topUpModalClosing) return;
 
-      const activeEsim = userEsims[0] ?? null;
+      const activeEsim = selectDashboardSim(userEsims, targetMsisdn);
       const msisdn =
         activeEsim?.esim?.msisdn?.trim() ||
         activeEsim?.esim?.phone_number?.trim() ||
@@ -1039,7 +1044,7 @@ export default function DashboardPage() {
       sessionStorage.setItem(CHECKOUT_TRANSITION_KEY, 'topup-modal');
       closeTopUpModal(() => router.push('/checkout'));
     },
-    [userEsims, purchase, router, topUpModalClosing, closeTopUpModal]
+    [userEsims, purchase, router, topUpModalClosing, closeTopUpModal, targetMsisdn]
   );
 
   useEffect(() => {
@@ -1283,7 +1288,7 @@ export default function DashboardPage() {
     );
   }
 
-  const primaryUserEsim = userEsims[0] ?? null;
+  const primaryUserEsim = selectDashboardSim(userEsims, targetMsisdn);
   const primaryBundle = purchase?.items?.[0]?.bundle;
   const pendingBundle = pendingPayment?.items?.[0]?.bundle;
   const latestPaidOrder = orders
@@ -1321,13 +1326,13 @@ export default function DashboardPage() {
   const apiBundle = primaryUserEsim?.bundle ?? latestOrderBundle ?? null;
 
   const assignedMsisdn =
-    assignedSim?.esim?.msisdn ??
-    assignedSim?.esim?.phone_number ??
     primaryUserEsim?.esim?.msisdn ??
     primaryUserEsim?.esim?.phone_number ??
+    assignedSim?.esim?.msisdn ??
+    assignedSim?.esim?.phone_number ??
     null;
   const assignedIccid =
-    assignedSim?.esim?.iccid ?? primaryUserEsim?.esim?.iccid ?? null;
+    primaryUserEsim?.esim?.iccid ?? assignedSim?.esim?.iccid ?? null;
   const assignedQrCodeData =
     (typeof primaryUserEsim?.esim?.qr_code_data === 'string'
       ? primaryUserEsim.esim.qr_code_data.trim()
@@ -1369,16 +1374,14 @@ export default function DashboardPage() {
     coerceNumber(latestPaidOrder?.order_items?.[0]?.data_amount) ??
     coerceNumber(apiBundle?.data_mb) ??
     null;
-  const displayDataMb =
-    confirmedDataMb ??
-    carrierDataMb ??
-    purchasedPlanMb;
+  const displayDataMb = dashboardDataMb(balancePolling, confirmedDataMb, carrierDataMb)
+    ?? (!balancePolling && !primaryUserEsim ? purchasedPlanMb : null);
 
-  const balanceStatusSub = confirmedDataMb != null || carrierDataMb != null
-    ? 'Live data remaining'
-    : balancePolling || waitingForSim
-      ? 'Confirming with the network'
-      : purchasedPlanMb != null
+  const balanceStatusSub = balancePolling || waitingForSim
+    ? 'Confirming with the network'
+    : confirmedDataMb != null || carrierDataMb != null
+      ? 'Total data remaining'
+      : !primaryUserEsim && purchasedPlanMb != null
         ? 'Purchased data'
         : 'Waiting for data balance';
 
@@ -1436,7 +1439,9 @@ export default function DashboardPage() {
   const headlineData = displayDataBalance(displayDataMb);
   const balanceAreaValue = displayDataBalance(displayDataMb);
 
+  const activeBundleHistory = (primaryUserEsim?.bundle_history ?? []).filter((entry) => !entry.expired);
   const esimTitle =
+    (activeBundleHistory.length > 1 ? 'Combined data bundles' : activeBundleHistory[0]?.name) ??
     assignedBundleName ??
     displayBundleName(pendingBundle?.name ?? primaryBundle?.name ?? latestPaidOrder?.order_items?.[0]?.bundle_name ?? null) ??
     (assignedMsisdn ? formatMsisdn(assignedMsisdn) : null) ??
@@ -1495,12 +1500,13 @@ export default function DashboardPage() {
     .filter(isPaidOrder)
     .flatMap((o) => o.order_items ?? [])
     .reduce((sum, item) => sum + (coerceNumber(item.data_amount) ?? 0), 0);
-  const bundleTotalMb =
+  const bundleTotalMb = primaryUserEsim?.active_bundles_data_mb ?? (
     purchasedDataMb ||
     coerceNumber(apiBundle?.data_mb) ||
     coerceNumber(primaryUserEsim?.order_item?.data_amount) ||
     coerceNumber(latestPaidOrder?.order_items?.[0]?.data_amount) ||
-    coerceNumber(primaryBundle?.data_mb);
+    coerceNumber(primaryBundle?.data_mb)
+  );
   const remainingMb = displayDataMb;
   const dataRemainingLabel =
     remainingMb != null
@@ -2318,6 +2324,8 @@ export default function DashboardPage() {
                   />
                 </div>
               </div>
+
+              <BundleHistory entries={primaryUserEsim?.bundle_history ?? []} />
 
               {isEsimType && primaryUserEsim?.id && planStartIso && (
                 <div
