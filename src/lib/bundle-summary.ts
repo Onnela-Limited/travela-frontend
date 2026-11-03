@@ -13,9 +13,13 @@ function normalizedNumber(number?: string | null) {
   return number?.replace(/[+\s]/g, '') ?? '';
 }
 
-export function selectDashboardSim<T extends { esim?: { msisdn?: string | null; phone_number?: string | null } | null }>(
-  sims: T[], targetMsisdn?: string,
+export function selectDashboardSim<T extends { id?: number; esim?: { msisdn?: string | null; phone_number?: string | null } | null }>(
+  sims: T[], targetMsisdn?: string, targetUserEsimId?: number,
 ): T | null {
+  if (targetUserEsimId !== undefined) {
+    const sim = sims.find((row) => row.id === targetUserEsimId);
+    return sim && (!targetMsisdn || normalizedNumber(sim.esim?.msisdn || sim.esim?.phone_number) === normalizedNumber(targetMsisdn)) ? sim : null;
+  }
   if (targetMsisdn) {
     const target = normalizedNumber(targetMsisdn);
     return sims.find((sim) => normalizedNumber(sim.esim?.msisdn || sim.esim?.phone_number) === target) ?? null;

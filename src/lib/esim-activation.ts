@@ -126,3 +126,18 @@ export function hasPendingEsimInstall(userEsimId: number): boolean {
   const pending = readPendingEsimInstall();
   return pending?.userEsimId === userEsimId;
 }
+
+export interface ActivationRetryLink {
+  userEsimId: number;
+  msisdn: string;
+}
+
+/** A retry link selects an assigned eSIM; it never overrides server activation state. */
+export function activationRetryFromSearch(search: string): ActivationRetryLink | null {
+  const params = new URLSearchParams(search);
+  const id = params.get('user_esim_id') ?? '';
+  const msisdn = params.get('msisdn')?.replace(/\s/g, '') ?? '';
+  if (params.get('retry_activation') !== '1' || !/^[1-9]\d*$/.test(id) ||
+    !Number.isSafeInteger(Number(id)) || !/^\+?\d{9,15}$/.test(msisdn)) return null;
+  return { userEsimId: Number(id), msisdn };
+}

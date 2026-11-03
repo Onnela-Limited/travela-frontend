@@ -721,7 +721,7 @@ export default function DashboardPage() {
   const loadEsimsRef = useRef(loadEsims);
   loadEsimsRef.current = loadEsims;
 
-  const { isPolling: balancePolling, confirmedDataMb, targetMsisdn } = useBalancePoll({
+  const { isPolling: balancePolling, confirmedDataMb, targetMsisdn, targetUserEsimId } = useBalancePoll({
     enabled: isAuthenticated && !isLoading,
     onBalanceReady: () => {
       void loadEsimsRef.current();
@@ -1006,7 +1006,7 @@ export default function DashboardPage() {
     (bundle: TopUpBundle) => {
       if (topUpModalClosing) return;
 
-      const activeEsim = selectDashboardSim(userEsims, targetMsisdn);
+      const activeEsim = selectDashboardSim(userEsims, targetMsisdn, targetUserEsimId);
       const msisdn =
         activeEsim?.esim?.msisdn?.trim() ||
         activeEsim?.esim?.phone_number?.trim() ||
@@ -1044,7 +1044,7 @@ export default function DashboardPage() {
       sessionStorage.setItem(CHECKOUT_TRANSITION_KEY, 'topup-modal');
       closeTopUpModal(() => router.push('/checkout'));
     },
-    [userEsims, purchase, router, topUpModalClosing, closeTopUpModal, targetMsisdn]
+    [userEsims, purchase, router, topUpModalClosing, closeTopUpModal, targetMsisdn, targetUserEsimId]
   );
 
   useEffect(() => {
@@ -1288,7 +1288,7 @@ export default function DashboardPage() {
     );
   }
 
-  const primaryUserEsim = selectDashboardSim(userEsims, targetMsisdn);
+  const primaryUserEsim = selectDashboardSim(userEsims, targetMsisdn, targetUserEsimId);
   const primaryBundle = purchase?.items?.[0]?.bundle;
   const pendingBundle = pendingPayment?.items?.[0]?.bundle;
   const latestPaidOrder = orders
@@ -2336,6 +2336,7 @@ export default function DashboardPage() {
                   }
                 >
                   <ActivateEsimButton
+                    key={`${primaryUserEsim.id}:${primaryUserEsim.device_activated_at || 'ready'}`}
                     userEsimId={primaryUserEsim.id}
                     qrCodeData={assignedQrCodeData}
                     deviceActivatedAt={primaryUserEsim.device_activated_at}

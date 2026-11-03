@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { EsimsApi } from '@/lib/api';
+import { activationRetryFromSearch, clearPendingEsimInstall } from '@/lib/esim-activation';
 import { clearBalancePoll, getBalancePollContext, initBalancePollFromUrl, type BalancePollContext } from '@/lib/balance-poll';
 import { dataMbFromBalanceStatusBody } from '@/lib/esim-balance';
 
@@ -21,6 +22,7 @@ export function useBalancePoll(options?: { onBalanceReady?: () => void; enabled?
   const inFlight = useRef(false);
   const [context, setContext] = useState<BalancePollContext | null>(null);
   const [targetMsisdn, setTargetMsisdn] = useState<string>();
+  const [targetUserEsimId, setTargetUserEsimId] = useState<number>();
   const [confirmedDataMb, setConfirmedDataMb] = useState<number | null>(null);
   const [pollComplete, setPollComplete] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
@@ -30,12 +32,29 @@ export function useBalancePoll(options?: { onBalanceReady?: () => void; enabled?
     if (!enabled) return;
     const initialize = window.setTimeout(() => {
       const params = new URLSearchParams(window.location.search);
+      const activationRetry = activationRetryFromSearch(window.location.search);
+      if (activationRetry) {
+        clearBalancePoll();
+        clearPendingEsimInstall(activationRetry.userEsimId);
+        setContext(null);
+        setConfirmedDataMb(null);
+        setIsPolling(false);
+        setTargetMsisdn(activationRetry.msisdn);
+        setTargetUserEsimId(activationRetry.userEsimId);
+        params.delete('retry_activation');
+        params.delete('user_esim_id');
+        params.delete('msisdn');
+        const query = params.toString();
+        router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+        return;
+      }
       const fromReturnUrl = params.get('await_balance') === '1' || params.has('purchased_mb');
       if (fromReturnUrl) initBalancePollFromUrl();
       const next = getBalancePollContext();
       if (next) {
         setContext(next);
         setTargetMsisdn(next.msisdn);
+        setTargetUserEsimId(undefined);
         setConfirmedDataMb(null);
         setPollComplete(false);
         setIsPolling(true);
@@ -102,5 +121,5 @@ export function useBalancePoll(options?: { onBalanceReady?: () => void; enabled?
     return () => { cancelled = true; clearInterval(timer); };
   }, [enabled, context, pollComplete, pollOnce]);
 
-  return { isPolling, confirmedDataMb, targetMsisdn };
+  return { isPolling, confirmedDataMb, targetMsisdn, targetUserEsimId };
 }
