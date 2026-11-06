@@ -94,6 +94,7 @@ interface OrderRecord {
   payment_reference: string | null;
   status: string;
   payment_status: string;
+  recharge_status?: string | null;
   total_amount: string;
   currency: string;
   paid_at: string | null;
@@ -211,6 +212,7 @@ type ApiBundle = {
 type BundlesResponse = { bundles: ApiBundle[] };
 
 interface UserEsimRecord {
+  number_assignment_only?: boolean;
   id: number;
   bundle_history?: BundleHistoryEntry[];
   active_bundles_data_mb?: number;
@@ -619,6 +621,7 @@ export default function DashboardPage() {
   );
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(true);
+  const [statusCheckedAt, setStatusCheckedAt] = useState(0);
   const [userEsims, setUserEsims] = useState<UserEsimRecord[]>([]);
   const [latestOrderBundle, setLatestOrderBundle] = useState<BundleDetail | null>(null);
   const [assignedSim, setAssignedSim] = useState<EsimAssignmentPayload | null>(null);
@@ -663,6 +666,7 @@ export default function DashboardPage() {
         return;
       }
       setOrders(parseOrdersFromBody(res.body));
+      setStatusCheckedAt(Date.now());
     } catch {
       setOrders([]);
     } finally {
@@ -1298,6 +1302,9 @@ export default function DashboardPage() {
         new Date(b.paid_at ?? b.created_at).getTime() -
         new Date(a.paid_at ?? a.created_at).getTime()
     )[0];
+  const setupNeedsReview = ['pending_retry', 'failed'].includes(latestPaidOrder?.recharge_status ?? '') ||
+    (['sent', 'queued', 'pending', 'in_progress'].includes(latestPaidOrder?.recharge_status ?? '') &&
+      statusCheckedAt - new Date(latestPaidOrder?.paid_at ?? latestPaidOrder?.created_at ?? '').getTime() > 10 * 60 * 1000);
   const latestUnpaidOrder = findLatestUnpaidOrder(orders);
   const pendingNeedsPayment = shouldRetryPendingPayment(orders, pendingPayment);
   const incompletePaymentOrder = latestUnpaidOrder;
@@ -1323,7 +1330,8 @@ export default function DashboardPage() {
     'USD';
   const incompleteOrderId =
     incompletePaymentOrder?.id ?? pendingPayment?.order_id ?? purchase?.orderId ?? null;
-  const apiBundle = primaryUserEsim?.bundle ?? latestOrderBundle ?? null;
+  const numberOnlyAssignment = primaryUserEsim?.number_assignment_only === true;
+  const apiBundle = primaryUserEsim?.bundle ?? (numberOnlyAssignment ? null : latestOrderBundle) ?? null;
 
   const assignedMsisdn =
     primaryUserEsim?.esim?.msisdn ??
@@ -1332,7 +1340,7 @@ export default function DashboardPage() {
     assignedSim?.esim?.phone_number ??
     null;
   const assignedIccid =
-    primaryUserEsim?.esim?.iccid ?? assignedSim?.esim?.iccid ?? null;
+    primaryUserEsim ? primaryUserEsim.esim?.iccid ?? null : assignedSim?.esim?.iccid ?? null;
   const assignedQrCodeData =
     (typeof primaryUserEsim?.esim?.qr_code_data === 'string'
       ? primaryUserEsim.esim.qr_code_data.trim()
@@ -1374,10 +1382,10 @@ export default function DashboardPage() {
     coerceNumber(latestPaidOrder?.order_items?.[0]?.data_amount) ??
     coerceNumber(apiBundle?.data_mb) ??
     null;
-  const displayDataMb = dashboardDataMb(balancePolling, confirmedDataMb, carrierDataMb)
+  const displayDataMb = numberOnlyAssignment ? carrierDataMb : dashboardDataMb(balancePolling, confirmedDataMb, carrierDataMb)
     ?? (!balancePolling && !primaryUserEsim ? purchasedPlanMb : null);
 
-  const balanceStatusSub = balancePolling || waitingForSim
+  const balanceStatusSub = numberOnlyAssignment ? 'No bundle added' : balancePolling || waitingForSim
     ? 'Confirming with the network'
     : confirmedDataMb != null || carrierDataMb != null
       ? 'Total data remaining'
@@ -1440,7 +1448,7 @@ export default function DashboardPage() {
   const balanceAreaValue = displayDataBalance(displayDataMb);
 
   const activeBundleHistory = (primaryUserEsim?.bundle_history ?? []).filter((entry) => !entry.expired);
-  const esimTitle =
+  const esimTitle = numberOnlyAssignment ? 'New number — no bundle added' :
     (activeBundleHistory.length > 1 ? 'Combined data bundles' : activeBundleHistory[0]?.name) ??
     assignedBundleName ??
     displayBundleName(pendingBundle?.name ?? primaryBundle?.name ?? latestPaidOrder?.order_items?.[0]?.bundle_name ?? null) ??
@@ -1449,7 +1457,7 @@ export default function DashboardPage() {
 
   const planValidityDays = PLAN_VALIDITY_DAYS;
   const scheduledActivationIso =
-    latestPaidOrder?.trip?.arrival_date ?? purchase?.trip?.arrivalDate ?? null;
+    numberOnlyAssignment ? null : latestPaidOrder?.trip?.arrival_date ?? purchase?.trip?.arrivalDate ?? null;
   const planStartIso = primaryUserEsim?.plan_started_at ?? null;
   const confirmedExpiryIso = primaryUserEsim?.plan_expires_at ?? null;
   const deactivationIso = confirmedExpiryIso ??
@@ -1483,7 +1491,7 @@ export default function DashboardPage() {
           ? 'tomorrow'
           : `in ${daysUntilActivation} days`;
 
-  const planLifecycleLabel = isPlanExpired
+  const planLifecycleLabel = numberOnlyAssignment ? 'Number assigned' : isPlanExpired
     ? 'Expired'
     : isReservedFuture
       ? 'Scheduled'
@@ -1825,18 +1833,22 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {latestPaidOrder &&
+        {numberOnlyAssignment && <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">Your new number has been assigned. No data bundle has been added to this number yet.</div>}
+
+        {latestPaidOrder && !numberOnlyAssignment &&
           !needsPaymentRetry &&
           (waitingForSim || (isEsimType && hasActiveEsim && !planStartIso)) &&
           !isPhysicalSimAwaitingPickup && (
           <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-4 flex items-start gap-3">
-            <Loader2 size={20} className="animate-spin text-sky-600 flex-shrink-0 mt-0.5" />
+            <Info size={20} className="text-sky-600 flex-shrink-0 mt-0.5" />
             <div>
               <p className="text-sm font-bold text-sky-900">
-                Payment received. We&apos;re setting up your eSIM.
+                {setupNeedsReview ? 'Payment received. Your eSIM setup needs review.' : "Payment received. We're setting up your eSIM."}
               </p>
               <p className="text-xs text-sky-700 mt-1">
-                Assignment and data setup run automatically. Your installation QR will appear when data is ready.
+                {setupNeedsReview
+                  ? 'Your bundle has not been confirmed as added. Please contact support with order #' + latestPaidOrder.id + '. You do not need to pay again. Your installation QR will appear after recharge is confirmed.'
+                  : 'Assignment and data setup run automatically. Your installation QR will appear when data is ready.'}
               </p>
             </div>
           </div>
@@ -2252,7 +2264,7 @@ export default function DashboardPage() {
                     )}
                     <p className="text-base font-black text-white mt-1">{esimTitle}</p>
                     <p className="text-sm font-semibold mt-1" style={{ color: '#17cf54' }}>
-                      Valid for {planValidityDays} days
+                      {numberOnlyAssignment ? 'No bundle added' : `Valid for ${planValidityDays} days`}
                     </p>
                     {purchase?.trip?.countryName && (
                       <p className="text-sm font-semibold mt-2 text-white/80">{purchase.trip.countryName}</p>
@@ -2438,8 +2450,8 @@ export default function DashboardPage() {
                   label: 'Duration',
                   value: confirmedExpiryIso
                     ? (daysRemainingLabel ?? planValidityLabel)
-                    : `Valid for ${planValidityDays} days`,
-                  sub: confirmedExpiryIso
+                    : numberOnlyAssignment ? 'No bundle added' : `Valid for ${planValidityDays} days`,
+                  sub: numberOnlyAssignment ? 'Validity starts after a bundle is added' : confirmedExpiryIso
                     ? formatTripDate(deactivationIso)
                       ? `Valid for ${planValidityDays} days · Expires ${formatTripDate(confirmedExpiryIso)}`
                       : `Valid for ${planValidityDays} days`
