@@ -3,6 +3,7 @@
 import { useAuth } from '@/lib/auth-context';
 import { OrderApi } from '@/lib/api';
 import { downloadReceiptPdf } from '@/lib/receipt-pdf';
+import { groupTransactions } from '@/lib/transaction-history';
 import { ArrowRight, Download, Loader2, Receipt, RefreshCw, X } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
@@ -496,7 +497,7 @@ function ReceiptsContent() {
             <Receipt size={36} className="mx-auto mb-4 text-slate-200" />
             <p className="text-sm font-semibold text-slate-500">No transactions yet.</p>
             <p className="text-xs text-slate-400 mt-1 mb-5">
-              Your completed purchases will appear here as transaction history.
+              Your orders and payment statuses will appear here.
             </p>
             <Link
               href="/bundles?country=TZ&countryName=Tanzania"
@@ -508,7 +509,15 @@ function ReceiptsContent() {
           </div>
         ) : (
           <div className="space-y-4">
-            {orders.map((order) => {
+            {groupTransactions(orders).filter(group => group.orders.length > 0 || ['Paid', 'Cancelled', 'Failed'].includes(group.label)).map((group) => (
+              <section key={group.label} aria-labelledby={`transactions-${group.label.toLowerCase()}`} className="space-y-4">
+                <h2 id={`transactions-${group.label.toLowerCase()}`} className="text-lg font-bold text-slate-900">
+                  {group.label} <span className="text-sm font-medium text-slate-500">({group.orders.length})</span>
+                </h2>
+                {group.orders.length === 0 && (
+                  <p className="text-sm text-slate-500">No {group.label.toLowerCase()} transactions.</p>
+                )}
+            {group.orders.map((order) => {
               const displayStatus = order.payment_status || order.status;
               const countryName = order.metadata?.countryName ?? order.trip?.destination_country;
               const simType = order.metadata?.simType;
@@ -601,6 +610,8 @@ function ReceiptsContent() {
                 </div>
               );
             })}
+              </section>
+            ))}
           </div>
         )}
       </div>

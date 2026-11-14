@@ -21,6 +21,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import NationalitySelect from '@/components/checkout/NationalitySelect';
 import PartnerReferralField from '@/components/checkout/PartnerReferralField';
+import NewEsimNotice from '@/components/checkout/NewEsimNotice';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, activationToday } from '@/lib/plan-validity';
 import LegalAcceptance from '@/components/legal/LegalAcceptance';
 import { AuthApi, extractAuthTokenFromBody, OrderApi } from '@/lib/api';
@@ -154,6 +155,7 @@ export default function CheckoutPage() {
 
   // Payment
   const [paying, setPaying] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
   const [showPaymentRedirectDialog, setShowPaymentRedirectDialog] = useState(false);
   const [registeredUserId, setRegisteredUserId] = useState<number | null>(null);
   const [orderDraftId, setOrderDraftId] = useState<string>(() => `DRAFT-${new Date().getFullYear()}-${Date.now()}`);
@@ -760,6 +762,7 @@ export default function CheckoutPage() {
 
     const paymentTab = beginPaymentTab();
 
+    setPaymentError('');
     setPaying(true);
     try {
       const userId = registeredUserId ?? getStoredUserId();
@@ -809,7 +812,7 @@ export default function CheckoutPage() {
       if (paymentTab && !paymentTab.closed) paymentTab.close();
       const fallback =
         e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
-      alert(fallback || 'Could not continue to payment.');
+      setPaymentError(fallback || 'Could not continue to payment.');
     } finally {
       setPaying(false);
       setShowPaymentRedirectDialog(false);
@@ -977,6 +980,7 @@ export default function CheckoutPage() {
       </div>
 
       <div className="max-w-3xl mx-auto px-4 py-8">
+        {cart.simType === 'esim' && cart.checkoutMode !== 'topup' && !isTopUpFlow && <NewEsimNotice />}
         <PartnerReferralField />
 
         {/* ── STEP 1: REGISTER ─────────────────────────────────────────── */}
@@ -1314,6 +1318,10 @@ export default function CheckoutPage() {
               </div>
             )}
 
+            {paymentError && <div role="alert" className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4">
+              <p className="text-sm font-medium text-red-800">{paymentError}</p>
+              <button type="button" disabled={paying} className="mt-3 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-800 disabled:opacity-60" onClick={() => { setShowPaymentRedirectDialog(false);router.push('/dashboard'); }}>Cancel checkout</button>
+            </div>}
             {/* Redirect information card */}
             <div className="bg-white rounded-2xl border border-slate-200 p-6 mb-6">
               <div className="flex items-start gap-4">

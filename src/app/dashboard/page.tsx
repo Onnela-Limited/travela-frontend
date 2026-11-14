@@ -15,11 +15,12 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { getBalancePollContext } from '@/lib/balance-poll';
-import { findLatestUnpaidOrder, isPaidOrder, shouldRetryPendingPayment } from '@/lib/payment-retry';
+import { findLatestUnpaidOrder, isPaidOrder, shouldRetryPendingPayment, canCancelFailedOrder } from '@/lib/payment-retry';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
 import { resolvePaymentTargetUrl, extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
+import { clearCancelledPayment } from '@/lib/payment-cancel';
 import { useBalancePoll } from '@/hooks/useBalancePoll';
 import {
   CheckCircle,
@@ -105,6 +106,7 @@ interface OrderRecord {
     simType?: string;
     country?: string;
     checkoutMode?: string;
+    customer_cancelled_at?: string;
   } | null;
   trip?: {
     destination_country?: string;
@@ -647,6 +649,9 @@ export default function DashboardPage() {
   const [receiptOrderId, setReceiptOrderId] = useState<string | null>(null);
   const [retryPaying, setRetryPaying] = useState(false);
   const [retryPayError, setRetryPayError] = useState('');
+  const [cancellingPayment, setCancellingPayment] = useState(false);
+  const [paymentCancelNotice, setPaymentCancelNotice] = useState('');
+  const paymentActionRef = useRef(false);
   const ordersRef = useRef(orders);
   const purchaseRef = useRef(purchase);
 
@@ -830,6 +835,7 @@ export default function DashboardPage() {
   };
 
   const handleRetryPayment = useCallback(async () => {
+    if (paymentActionRef.current) return;paymentActionRef.current = true;setPaymentCancelNotice('');
     setRetryPayError('');
     setRetryPaying(true);
     const paymentTab = window.open('about:blank', '_blank');
@@ -932,7 +938,7 @@ export default function DashboardPage() {
         e instanceof Error ? e.message : 'Could not restart payment. Try again.'
       );
     } finally {
-      setRetryPaying(false);
+      setRetryPaying(false);paymentActionRef.current = false;
     }
   }, [orders, pendingPayment, user?.email]);
 
@@ -1305,6 +1311,22 @@ export default function DashboardPage() {
   const setupNeedsReview = ['pending_retry', 'failed'].includes(latestPaidOrder?.recharge_status ?? '') ||
     (['sent', 'queued', 'pending', 'in_progress'].includes(latestPaidOrder?.recharge_status ?? '') &&
       statusCheckedAt - new Date(latestPaidOrder?.paid_at ?? latestPaidOrder?.created_at ?? '').getTime() > 10 * 60 * 1000);
+  const handleCancelFailedPayment = async (order: OrderRecord) => {
+    if (paymentActionRef.current || !canCancelFailedOrder(order)) return;
+    paymentActionRef.current = true;setCancellingPayment(true);setRetryPayError('');setPaymentCancelNotice('');
+    try {
+      const result = await OrderApi.cancelFailedPayment(order.id);
+      if (!result.ok) throw new Error(apiErrorMessage(result.body,'Could not cancel this failed order. Refresh its status and try again.'));
+      const cancelled = (result.body as {order?:{id?:number;status?:string;payment_status?:string;customer_cancelled_at?:string}} | null)?.order;
+      if (!cancelled || String(cancelled.id)!==String(order.id) || cancelled.status!=='cancelled' || cancelled.payment_status!=='cancelled' || !cancelled.customer_cancelled_at) throw new Error('Could not confirm cancellation. Refresh the order status before trying again.');
+      clearCancelledPayment(order,localStorage,sessionStorage);
+      setPendingPayment(readPendingPaymentFromStorage());setPurchase(readLastPurchaseFromStorage());
+      if (receiptOrderId === String(order.id)) { setShowReceiptPrompt(false);setReceiptOrderId(null); }
+      setOrders(current=>current.map(item=>item.id===order.id?{...item,status:'cancelled',payment_status:'cancelled',metadata:{...item.metadata,customer_cancelled_at:cancelled.customer_cancelled_at}}:item));
+      setPaymentCancelNotice('The failed order was cancelled. You can choose a plan and start a new checkout.');
+    } catch (failure) { setRetryPayError(failure instanceof Error ? failure.message : 'Could not cancel the failed order.'); }
+    finally { await loadOrders();paymentActionRef.current = false;setCancellingPayment(false); }
+  };
   const latestUnpaidOrder = findLatestUnpaidOrder(orders);
   const pendingNeedsPayment = shouldRetryPendingPayment(orders, pendingPayment);
   const incompletePaymentOrder = latestUnpaidOrder;
@@ -1688,6 +1710,7 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {paymentCancelNotice && <p role="status" className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">{paymentCancelNotice}</p>}
         {needsPaymentRetry && (
           <div className="rounded-2xl border border-amber-200 bg-white overflow-hidden shadow-sm">
             <div
@@ -1736,7 +1759,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => void handleRetryPayment()}
-                  disabled={retryPaying}
+                  disabled={retryPaying || cancellingPayment}
                   className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold text-white hover:opacity-90 disabled:opacity-60"
                   style={{ backgroundColor: '#112116' }}
                 >
@@ -1753,13 +1776,14 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => void loadOrders()}
-                  disabled={ordersLoading}
+                  disabled={ordersLoading || retryPaying || cancellingPayment}
                   aria-busy={ordersLoading}
                   className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-bold border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
                 >
                   {ordersLoading && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
                   {ordersLoading ? 'Refreshing…' : 'Refresh status'}
                 </button>
+                {incompletePaymentOrder && canCancelFailedOrder(incompletePaymentOrder) && <button type="button" disabled={retryPaying || cancellingPayment} onClick={() => void handleCancelFailedPayment(incompletePaymentOrder)} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{cancellingPayment ? <><Loader2 size={16} className="animate-spin" /> Cancelling…</> : 'Cancel failed order'}</button>}
               </div>
             </div>
           </div>

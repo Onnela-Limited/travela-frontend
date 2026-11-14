@@ -8,7 +8,7 @@ export interface PaymentRetryOrder {
   created_at?: string;
   total_amount: string | number;
   currency: string;
-  metadata?: { simType?: string; checkoutMode?: string; country?: string } | null;
+  metadata?: { simType?: string; checkoutMode?: string; country?: string; customer_cancelled_at?: string } | null;
   trip?: { destination_country?: string; arrival_date?: string; departure_date?: string } | null;
   order_items?: Array<{
     bundle_id?: number;
@@ -39,10 +39,15 @@ export function isPaidOrder(order: PaymentRetryOrder): boolean {
 }
 
 export function isUnpaidPayableOrder(order: PaymentRetryOrder): boolean {
-  if (isPaidOrder(order) || order.paid_at) return false;
+  if (isPaidOrder(order) || order.paid_at || order.metadata?.customer_cancelled_at) return false;
   return ['', 'pending', 'pending_payment', 'unpaid', 'failed', 'payment_failed', 'cancelled', 'canceled',
     'expired', 'awaiting_payment', 'payment_required', 'initiated', 'created', 'draft']
     .includes(normalized(order.payment_status || order.status));
+}
+
+export function canCancelFailedOrder(order: PaymentRetryOrder): boolean {
+  return !isPaidOrder(order) && !['paid','completed'].includes(normalized(order.status)) && !order.paid_at && !order.metadata?.customer_cancelled_at
+    && ['failed','payment_failed'].includes(normalized(order.payment_status || order.status));
 }
 
 function samePurchase(a: PaymentRetryOrder, b: PaymentRetryOrder): boolean {

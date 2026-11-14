@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BundlesApi, EsimsApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
+import NewEsimNotice from '@/components/checkout/NewEsimNotice';
 import {
   type Bundle,
   type BundlesResponse,
@@ -45,7 +46,7 @@ function scrollToEl(el: HTMLElement | null) {
 function BundlesContent() {
   const params = useSearchParams();
   const router = useRouter();
-  const { isLoading: authLoading } = useAuth();
+  const { isLoading: authLoading, isAuthenticated } = useAuth();
   const country = params.get('country') ?? 'TZ';
   const countryName = params.get('countryName') ?? 'Tanzania';
   const topupParam = params.get('topup');
@@ -447,6 +448,7 @@ function BundlesContent() {
                 {selectedBundle.currency ?? 'USD'} {Number(selectedBundle.price ?? 0).toFixed(2)}
                 ). Tap Continue below to checkout.
               </p>
+              {!authLoading && !isAuthenticated && topupParam !== '1' && <NewEsimNotice />}
               <button
                 type="button"
                 onClick={handleCheckout}

@@ -338,6 +338,12 @@ export const OrderApi = {
     });
     return toApiResult(res);
   },
+  cancelFailedPayment: async (orderId: string | number): Promise<ApiResult> => {
+    const res = await authFetch(`${PUBLIC_API_BASE}/orders/${orderId}/cancel-failed-payment`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    return toApiResult(res);
+  },
   /** POST /orders */
   create: async (payload: unknown): Promise<ApiResult> => {
     try { await waitForReferralChange(); }
