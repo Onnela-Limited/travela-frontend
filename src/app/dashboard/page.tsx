@@ -1711,7 +1711,7 @@ export default function DashboardPage() {
         )}
 
         {paymentCancelNotice && <p role="status" className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">{paymentCancelNotice}</p>}
-        {needsPaymentRetry && (
+        {needsPaymentRetry && !assignedMsisdn && (
           <div className="rounded-2xl border border-amber-200 bg-white overflow-hidden shadow-sm">
             <div
               className="px-5 py-4 flex items-start justify-between gap-3"
