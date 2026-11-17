@@ -19,6 +19,7 @@ import { findLatestUnpaidOrder, isPaidOrder, shouldRetryPendingPayment, canCance
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
+import { checkoutForSim, checkoutSimRows } from '@/lib/checkout-sim';
 import { resolvePaymentTargetUrl, extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
 import { clearCancelledPayment } from '@/lib/payment-cancel';
 import { useBalancePoll } from '@/hooks/useBalancePoll';
@@ -645,6 +646,8 @@ export default function DashboardPage() {
   const [topUpModalClosing, setTopUpModalClosing] = useState(false);
   const [topUpBundles, setTopUpBundles] = useState<TopUpBundle[]>([]);
   const [topUpBundlesLoading, setTopUpBundlesLoading] = useState(false);
+  const topUpPurchaseRef = useRef(false);
+  const [topUpPurchaseLoading, setTopUpPurchaseLoading] = useState(false);
   const [showReceiptPrompt, setShowReceiptPrompt] = useState(false);
   const [receiptOrderId, setReceiptOrderId] = useState<string | null>(null);
   const [retryPaying, setRetryPaying] = useState(false);
@@ -1013,48 +1016,50 @@ export default function DashboardPage() {
   }, [topUpModalOpen, closeTopUpModal]);
 
   const handleTopUpPurchase = useCallback(
-    (bundle: TopUpBundle) => {
-      if (topUpModalClosing) return;
+    async (bundle: TopUpBundle) => {
+      if (topUpModalClosing || topUpPurchaseRef.current) return;
+      topUpPurchaseRef.current = true;
+      setTopUpPurchaseLoading(true);
+      try {
+        const response = await EsimsApi.listMine();
+        if (!response.ok) throw new Error('Could not load your SIM. Please try again.');
+        const freshSims = parseEsimsFromBody({ data: checkoutSimRows(response.body) }).esims;
+        setUserEsims(freshSims);
 
-      const activeEsim = selectDashboardSim(userEsims, targetMsisdn, targetUserEsimId);
-      const msisdn =
-        activeEsim?.esim?.msisdn?.trim() ||
-        activeEsim?.esim?.phone_number?.trim() ||
-        '';
+        const activeEsim = selectDashboardSim(freshSims, targetMsisdn, targetUserEsimId);
+        if (!activeEsim && freshSims.length) {
+          throw new Error('The selected SIM is no longer available. Refresh your dashboard and try again.');
+        }
+        const checkout = checkoutForSim(activeEsim);
 
-      if (!activeEsim?.id || !msisdn) {
-        window.alert('No SIM found on your account. Complete your first purchase first.');
-        return;
+        const country = activeEsim?.order?.metadata?.country ?? 'TZ';
+        const countryName =
+          activeEsim?.order?.metadata?.countryName ??
+          purchase?.trip?.countryName ??
+          'Tanzania';
+        const simType =
+          activeEsim?.esim?.sim_type === 'physical' ? 'physical' : 'esim';
+
+        localStorage.setItem(
+          'cart',
+          JSON.stringify({
+            bundle,
+            country,
+            countryName,
+            simType,
+            ...checkout,
+          })
+        );
+        sessionStorage.setItem(CHECKOUT_TRANSITION_KEY, 'topup-modal');
+        closeTopUpModal(() => router.push('/checkout'));
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : 'Could not load your SIM. Please try again.');
+      } finally {
+        topUpPurchaseRef.current = false;
+        setTopUpPurchaseLoading(false);
       }
-
-      const country = activeEsim?.order?.metadata?.country ?? 'TZ';
-      const countryName =
-        activeEsim?.order?.metadata?.countryName ??
-        purchase?.trip?.countryName ??
-        'Tanzania';
-      const simType =
-        activeEsim?.esim?.sim_type === 'physical' ? 'physical' : 'esim';
-
-      const currentDataMb =
-        dataMbFromAssignment(activeEsim) ?? 0;
-
-      localStorage.setItem(
-        'cart',
-        JSON.stringify({
-          bundle,
-          country,
-          countryName,
-          simType,
-          checkoutMode: 'topup',
-          user_esim_id: activeEsim.id,
-          msisdn,
-          current_data_mb: currentDataMb,
-        })
-      );
-      sessionStorage.setItem(CHECKOUT_TRANSITION_KEY, 'topup-modal');
-      closeTopUpModal(() => router.push('/checkout'));
     },
-    [userEsims, purchase, router, topUpModalClosing, closeTopUpModal, targetMsisdn, targetUserEsimId]
+    [purchase, router, topUpModalClosing, closeTopUpModal, targetMsisdn, targetUserEsimId]
   );
 
   useEffect(() => {
@@ -1676,11 +1681,11 @@ export default function DashboardPage() {
                     <button
                       type="button"
                       onClick={() => handleTopUpPurchase(bundle)}
-                      disabled={topUpModalClosing}
+                      disabled={topUpModalClosing || topUpPurchaseLoading}
                       className="flex-shrink-0 px-4 py-2.5 rounded-xl text-xs font-bold text-white hover:opacity-90 transition-opacity disabled:opacity-60"
                       style={{ backgroundColor: '#112116' }}
                     >
-                      Purchase
+                      {topUpPurchaseLoading ? 'Checking SIM…' : 'Purchase'}
                     </button>
                   </div>
                 ))
@@ -2540,6 +2545,14 @@ export default function DashboardPage() {
             <p className="text-sm text-slate-500 max-w-xs mx-auto leading-relaxed">
               Purchase an eSIM bundle to stay connected during your travels.
             </p>
+            <button
+              type="button"
+              onClick={() => setTopUpModalOpen(true)}
+              className="mt-6 inline-flex items-center justify-center rounded-xl px-5 py-3 text-sm font-bold text-white hover:opacity-90 transition-opacity"
+              style={{ backgroundColor: '#112116' }}
+            >
+              Buy eSIM
+            </button>
           </div>
         )}
 

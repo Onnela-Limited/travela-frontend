@@ -14,7 +14,7 @@ import {
   formatMb,
   mapApiBundles,
 } from '@/lib/bundles';
-import { dataMbFromAssignment } from '@/lib/esim-balance';
+import { checkoutForSim, checkoutSimRows } from '@/lib/checkout-sim';
 
 type CheckoutMode = 'standard' | 'topup';
 
@@ -126,7 +126,7 @@ function BundlesContent() {
   const handleCheckout = async () => {
     if (!selectedBundle) return;
     const isRegisteredCustomer = !!localStorage.getItem('token');
-    const checkoutMode: CheckoutMode =
+    let checkoutMode: CheckoutMode =
       topupParam === '1' || isRegisteredCustomer ? 'topup' : 'standard';
 
     let user_esim_id: number | undefined;
@@ -140,32 +140,13 @@ function BundlesContent() {
           window.alert('Could not load your SIM. Try again from the dashboard.');
           return;
         }
-        const body = res.body as { data?: unknown[]; esims?: unknown[] } | unknown[];
-        const rows = Array.isArray(body)
-          ? body
-          : Array.isArray(body?.data)
-            ? body.data
-            : Array.isArray(body?.esims)
-              ? body.esims
-              : [];
-        const first = rows[0] as {
-          id?: number;
-          balances?: Record<string, unknown> | null;
-          bundle?: { data_mb?: number | null };
-          order_item?: { data_amount?: number | null };
-          esim?: { msisdn?: string | null; phone_number?: string | null };
-        } | undefined;
-        user_esim_id = first?.id;
-        msisdn =
-          first?.esim?.msisdn?.trim() ||
-          first?.esim?.phone_number?.trim() ||
-          undefined;
-        if (!user_esim_id || !msisdn) {
-          window.alert('No SIM found on your account. Complete your first purchase first.');
-          return;
+        const checkout = checkoutForSim(checkoutSimRows(res.body)[0]);
+        checkoutMode = checkout.checkoutMode;
+        if (checkout.checkoutMode === 'topup') {
+          user_esim_id = checkout.user_esim_id;
+          msisdn = checkout.msisdn;
+          current_data_mb = checkout.current_data_mb;
         }
-        const liveDataMb = dataMbFromAssignment(first);
-        if (liveDataMb != null) current_data_mb = liveDataMb;
       } catch {
         window.alert('Could not load your SIM. Try again from the dashboard.');
         return;
