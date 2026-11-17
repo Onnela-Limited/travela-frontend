@@ -612,51 +612,6 @@ export default function CheckoutPage() {
     }
   };
 
-  const savePendingPayment = (opts: {
-    emailOverride?: string;
-    orderId?: string | number;
-    draftId?: string;
-    paymentUrl?: string | null;
-  }) => {
-    const payEmail = (opts.emailOverride ?? email).trim();
-    const snapshot = {
-      order_id: opts.orderId,
-      draft_id: opts.draftId ?? orderDraftId,
-      payment_url: opts.paymentUrl ?? undefined,
-      items: [{ bundle: cart.bundle, quantity: 1 }],
-      trip: {
-        countryName: cart.countryName,
-        arrivalDate: cart.tripArrivalDate,
-        departureDate: cart.tripDepartureDate,
-        duration:
-          cart.tripArrivalDate && cart.tripDepartureDate
-            ? PLAN_VALIDITY_DAYS
-            : undefined,
-      },
-      simType: cart.simType,
-      country: cart.country,
-      countryName: cart.countryName,
-      total,
-      currency,
-      email: payEmail,
-      createdAt: new Date().toISOString(),
-    };
-    localStorage.setItem('pendingPayment', JSON.stringify(snapshot));
-    localStorage.setItem(
-      'lastPurchase',
-      JSON.stringify({
-        items: snapshot.items,
-        trip: snapshot.trip,
-        total,
-        currency,
-        orderId: snapshot.order_id,
-        draftId: snapshot.draft_id,
-        simType: cart.simType,
-        date: snapshot.createdAt,
-      })
-    );
-  };
-
   const extractUserIdFromRegisterBody = (body: unknown): number | null => {
     if (!body || typeof body !== 'object') return null;
     const b = body as Record<string, unknown>;
@@ -792,7 +747,6 @@ export default function CheckoutPage() {
         draftId,
       });
 
-      savePendingPayment({ orderId, draftId, paymentUrl: targetUrl });
 
       if (cart && (isTopUpFlow || cart.simType === 'esim')) {
         startBalancePoll({ msisdn: cart.msisdn });

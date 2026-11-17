@@ -326,7 +326,7 @@ export const AuthApi = {
 export const OrderApi = {
   /** GET /me/orders — list orders for the signed-in user */
   listMine: async (): Promise<ApiResult> => {
-    const res = await authFetch(`${PUBLIC_API_BASE}/me/orders`);
+    const res = await authFetch(`${PUBLIC_API_BASE}/me/orders`, { cache: 'no-store' });
     return toApiResult(res);
   },
   /** POST /orders/{orderId}/evpay-checkout-url — reuse or create the EvMak checkout link */

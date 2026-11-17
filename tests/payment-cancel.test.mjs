@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {canCancelFailedOrder,findLatestUnpaidOrder,shouldRetryPendingPayment} from '../src/lib/payment-retry.ts';
+import {canCancelFailedOrder,findLatestUnpaidOrder} from '../src/lib/payment-retry.ts';
 import {clearCancelledPayment} from '../src/lib/payment-cancel.ts';
 const failed=patch=>({id:10,draft_id:'DRAFT-10',payment_status:'failed',status:'payment_failed',paid_at:null,total_amount:'20.00',currency:'USD',...patch});
 const store=entries=>{const data=new Map(Object.entries(entries));return {getItem:key=>data.get(key)??null,removeItem:key=>data.delete(key),data};};
@@ -10,7 +10,7 @@ test('cancel is offered only for confirmed failed and unpaid orders',()=>{
 });
 test('explicitly cancelled orders cannot return as unpaid reminders but late payment success remains paid',()=>{
  const cancelled=failed({status:'cancelled',payment_status:'cancelled',metadata:{customer_cancelled_at:'2026-11-14T10:00:00Z'}});
- assert.equal(findLatestUnpaidOrder([cancelled]),null);assert.equal(shouldRetryPendingPayment([cancelled],{order_id:10}),false);
+ assert.equal(findLatestUnpaidOrder([cancelled]),null);
  const other=failed({id:11});assert.equal(findLatestUnpaidOrder([cancelled,other]).id,11);
  assert.equal(findLatestUnpaidOrder([{...cancelled,status:'paid',payment_status:'paid',paid_at:'2026-11-14T10:01:00Z'}]),null);
  assert.equal(findLatestUnpaidOrder([failed({payment_status:'cancelled',status:'cancelled'})]).id,10);

@@ -19,19 +19,6 @@ export interface PaymentRetryOrder {
   }>;
 }
 
-export interface PendingRetryPayment {
-  order_id?: string | number;
-  draft_id?: string;
-  total?: number;
-  currency?: string;
-  simType?: string;
-  country?: string;
-  checkoutMode?: string;
-  createdAt?: string;
-  trip?: { arrivalDate?: string; departureDate?: string };
-  items?: Array<{ bundle: { name: string; data_mb?: number; validity_days?: number }; quantity: number }>;
-}
-
 const normalized = (value?: string | null) => (value || '').trim().toLowerCase();
 
 export function isPaidOrder(order: PaymentRetryOrder): boolean {
@@ -95,25 +82,4 @@ export function hasSuccessfulReplacement(order: PaymentRetryOrder, orders: Payme
 export function findLatestUnpaidOrder<T extends PaymentRetryOrder>(orders: T[]): T | null {
   return orders.filter((order) => isUnpaidPayableOrder(order) && !hasSuccessfulReplacement(order, orders))
     .sort((a, b) => (Date.parse(b.created_at || '') || b.id) - (Date.parse(a.created_at || '') || a.id))[0] ?? null;
-}
-
-export function shouldRetryPendingPayment(orders: PaymentRetryOrder[], pending?: PendingRetryPayment | null): boolean {
-  if (!pending) return false;
-  const known = orders.find((order) =>
-    (pending.order_id != null && String(order.id) === String(pending.order_id))
-    || (pending.draft_id && order.draft_id === pending.draft_id));
-  if (known) return isUnpaidPayableOrder(known) && !hasSuccessfulReplacement(known, orders);
-  // A cached order absent from the response can still be an older checkout.
-  // Without an order ID there is no reliable chronology, so keep its reminder.
-  const id = Number(pending.order_id);
-  if (!Number.isFinite(id) || id <= 0 || pending.total == null || !pending.currency) return true;
-  const snapshot: PaymentRetryOrder = {
-    id, created_at: pending.createdAt, total_amount: pending.total, currency: pending.currency,
-    metadata: { simType: pending.simType, checkoutMode: pending.checkoutMode, country: pending.country },
-    trip: { destination_country: pending.country, arrival_date: pending.trip?.arrivalDate, departure_date: pending.trip?.departureDate },
-    order_items: pending.items?.flatMap((item) => Array.from({ length: item.quantity }, () => ({
-      bundle_name: item.bundle.name, data_amount: item.bundle.data_mb, validity_days: item.bundle.validity_days,
-    }))),
-  };
-  return !hasSuccessfulReplacement(snapshot, orders);
 }

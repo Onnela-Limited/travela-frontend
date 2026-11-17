@@ -14,8 +14,7 @@ import {
   type EsimAssignmentStatus,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
-import { getBalancePollContext } from '@/lib/balance-poll';
-import { findLatestUnpaidOrder, isPaidOrder, shouldRetryPendingPayment, canCancelFailedOrder } from '@/lib/payment-retry';
+import { findLatestUnpaidOrder, isPaidOrder, canCancelFailedOrder } from '@/lib/payment-retry';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
 import { displayBundleName } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
@@ -468,32 +467,30 @@ function shouldPollAssignment(status: EsimAssignmentStatus, justPaid: boolean): 
   return justPaid && status.status === 'payment_required';
 }
 
-function readPendingPaymentFromStorage(): PendingPaymentData | null {
-  if (typeof window === 'undefined') return null;
-  const raw = localStorage.getItem('pendingPayment');
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as PendingPaymentData;
-  } catch {
-    return null;
-  }
-}
-
-function readLastPurchaseFromStorage(): PurchaseData | null {
-  if (typeof window === 'undefined') return null;
-  const raw = localStorage.getItem('lastPurchase');
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as PurchaseData;
-  } catch {
-    return null;
-  }
+/** Display projections of server orders only; never restore browser snapshots. */
+function purchaseFromOrder(order: OrderRecord | null | undefined): PurchaseData | null {
+  if (!order) return null;
+  return {
+    orderId: order.id,
+    draftId: order.draft_id,
+    simType: order.metadata?.simType,
+    total: Number(order.total_amount),
+    currency: order.currency,
+    items: order.order_items?.map(item => ({
+      bundle: { name: item.bundle_name, data_mb: item.data_amount ?? undefined,
+        validity_days: item.validity_days, price: item.price, currency: item.currency },
+      quantity: 1,
+    })),
+    trip: { countryName: order.metadata?.countryName ?? order.trip?.destination_country,
+      arrivalDate: order.trip?.arrival_date, departureDate: order.trip?.departure_date,
+      duration: order.trip?.duration_days },
+  };
 }
 
 function parseOrdersFromBody(body: unknown): OrderRecord[] {
-  if (!body || typeof body !== 'object') return [];
+  if (!body || typeof body !== 'object') throw new Error('Could not load your orders. Please try again.');
   const b = body as { data?: unknown };
-  if (!Array.isArray(b.data)) return [];
+  if (!Array.isArray(b.data)) throw new Error('Could not load your orders. Please try again.');
   return b.data as OrderRecord[];
 }
 
@@ -505,37 +502,13 @@ function unpaidStatusLabel(status?: string | null) {
   return 'Payment pending';
 }
 
-function checkoutUrlFromOrder(order: OrderRecord | null | undefined): string | null {
-  const payload = order?.payment_payload;
-  if (!payload || typeof payload !== 'object') return null;
-  const record = payload as Record<string, unknown>;
-  const response =
-    record.response && typeof record.response === 'object'
-      ? (record.response as Record<string, unknown>)
-      : null;
-  const candidates = [
-    response?.paymentUrl,
-    response?.payment_url,
-    response?.checkout_url,
-    record.paymentUrl,
-    record.payment_url,
-    record.checkout_url,
-  ];
-  for (const value of candidates) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return null;
-}
-
 function formatOrderItemData(mb?: number | null) {
   if (mb == null || mb <= 0) return '—';
   return mb >= 1024 ? `${(mb / 1024).toFixed(0)} GB` : `${mb} MB`;
 }
 
 function resolvePhysicalPickupDetails(
-  orders: OrderRecord[],
-  _pendingPayment: PendingPaymentData | null,
-  _purchase: PurchaseData | null
+  orders: OrderRecord[]
 ): PhysicalPickupDetails | null {
   const apiOrder = orders
     .filter((o) => o.metadata?.simType === 'physical' && isPaidOrder(o))
@@ -575,16 +548,13 @@ function resolvePhysicalPickupDetails(
     };
   }
 
-  // Unpaid local pendingPayment / lastPurchase must not unlock pickup UI.
   return null;
 }
 
 function hasPhysicalSimPurchase(
-  orders: OrderRecord[],
-  pendingPayment: PendingPaymentData | null,
-  purchase: PurchaseData | null
+  orders: OrderRecord[]
 ): boolean {
-  return resolvePhysicalPickupDetails(orders, pendingPayment, purchase) != null;
+  return resolvePhysicalPickupDetails(orders) != null;
 }
 
 function simTypeLabel(simType?: string | null) {
@@ -618,12 +588,21 @@ function formatMsisdn(msisdn?: string | null) {
 export default function DashboardPage() {
   const { isAuthenticated, isLoading, user } = useAuth();
   const router = useRouter();
-  const [purchase, setPurchase] = useState<PurchaseData | null>(() => readLastPurchaseFromStorage());
-  const [pendingPayment, setPendingPayment] = useState<PendingPaymentData | null>(
-    () => readPendingPaymentFromStorage()
-  );
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const serverPaidOrder = orders.filter(isPaidOrder).sort((a, b) =>
+    Date.parse(b.paid_at ?? b.created_at) - Date.parse(a.paid_at ?? a.created_at))[0];
+  const purchase = purchaseFromOrder(serverPaidOrder);
+  const serverUnpaidOrder = findLatestUnpaidOrder(orders);
+  const pendingPurchase = purchaseFromOrder(serverUnpaidOrder);
+  const pendingPayment: PendingPaymentData | null = serverUnpaidOrder ? {
+    ...pendingPurchase,
+    order_id: serverUnpaidOrder.id,
+    draft_id: serverUnpaidOrder.draft_id,
+    country: serverUnpaidOrder.metadata?.country,
+    countryName: serverUnpaidOrder.metadata?.countryName,
+  } : null;
   const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState('');
   const [statusCheckedAt, setStatusCheckedAt] = useState(0);
   const [userEsims, setUserEsims] = useState<UserEsimRecord[]>([]);
   const [latestOrderBundle, setLatestOrderBundle] = useState<BundleDetail | null>(null);
@@ -656,27 +635,22 @@ export default function DashboardPage() {
   const [paymentCancelNotice, setPaymentCancelNotice] = useState('');
   const paymentActionRef = useRef(false);
   const ordersRef = useRef(orders);
-  const purchaseRef = useRef(purchase);
 
   ordersRef.current = orders;
-  purchaseRef.current = purchase;
 
   const loadOrders = useCallback(async () => {
     setOrdersLoading(true);
+    setOrdersError('');
     try {
       const res = await OrderApi.listMine();
       if (!res.ok) {
-        if (res.status === 401) {
-          setOrders([]);
-          return;
-        }
-        setOrders([]);
-        return;
+        throw new Error(apiErrorMessage(res.body, 'Could not load your orders. Please try again.'));
       }
       setOrders(parseOrdersFromBody(res.body));
       setStatusCheckedAt(Date.now());
-    } catch {
+    } catch (error) {
       setOrders([]);
+      setOrdersError(error instanceof Error ? error.message : 'Could not load your orders. Please try again.');
     } finally {
       setOrdersLoading(false);
     }
@@ -818,7 +792,6 @@ export default function DashboardPage() {
       setWaitingForSim(false);
       setAssignmentLoading(false);
       localStorage.removeItem('pendingPayment');
-      setPendingPayment(null);
 
       const body = res.body as { recharge?: { recharge_status?: string; failed?: number } } | null;
       const recharge = body?.recharge;
@@ -845,41 +818,24 @@ export default function DashboardPage() {
     if (paymentTab) paymentTab.opener = null;
     try {
       if (!paymentTab) throw new Error('Could not open the payment page. Allow pop-ups and try again.');
-      const unpaidOrder = findLatestUnpaidOrder(orders);
-      const cachedPending = pendingPayment ?? readPendingPaymentFromStorage();
-      const pending = shouldRetryPendingPayment(orders, cachedPending) ? cachedPending : null;
-
-      const orderId = unpaidOrder?.id ?? pending?.order_id;
-      if (orderId == null) {
-        throw new Error('No unpaid order found. Start checkout again from bundles.');
-      }
-
-      const draftId = unpaidOrder?.draft_id ?? pending?.draft_id;
-      const amount = unpaidOrder
-        ? Number(unpaidOrder.total_amount)
-        : Number(pending?.total ?? 0);
-      const currency = unpaidOrder?.currency ?? pending?.currency ?? 'USD';
-      const email =
-        (typeof user?.email === 'string' ? user.email : '') ||
-        pending?.email ||
-        '';
-      const country =
-        unpaidOrder?.metadata?.country ?? pending?.country ?? 'TZ';
-      const countryName =
-        unpaidOrder?.metadata?.countryName ??
-        unpaidOrder?.trip?.destination_country ??
-        pending?.countryName ??
-        pending?.trip?.countryName ??
-        'Tanzania';
-      const simType =
-        unpaidOrder?.metadata?.simType ?? pending?.simType ?? 'esim';
-
-      let paymentUrl = normalizePaymentUrl(checkoutUrlFromOrder(unpaidOrder)) ??
-        (String(pending?.order_id) === String(orderId) ? normalizePaymentUrl(pending?.payment_url) : null);
-      if (!paymentUrl) {
-        const res = await OrderApi.evpayCheckoutUrl(orderId);
-        if (res.ok) paymentUrl = normalizePaymentUrl(extractPaymentUrl(res.body));
-      }
+      // Refresh before retrying so a deleted or newly paid order cannot be reopened.
+      const response = await OrderApi.listMine();
+      if (!response.ok) throw new Error('Could not load your orders. Please try again.');
+      const freshOrders = parseOrdersFromBody(response.body);
+      setOrders(freshOrders);
+      const unpaidOrder = findLatestUnpaidOrder(freshOrders);
+      if (!unpaidOrder) throw new Error('No unpaid order found. Choose a plan to start a new purchase.');
+      const orderId = unpaidOrder.id;
+      const draftId = unpaidOrder.draft_id;
+      const amount = Number(unpaidOrder.total_amount);
+      const currency = unpaidOrder.currency;
+      const email = user?.email ?? '';
+      const country = unpaidOrder.metadata?.country ?? 'TZ';
+      const countryName = unpaidOrder.metadata?.countryName ?? unpaidOrder.trip?.destination_country ?? 'Tanzania';
+      const simType = unpaidOrder.metadata?.simType ?? 'esim';
+      const checkout = await OrderApi.evpayCheckoutUrl(orderId);
+      if (!checkout.ok) throw new Error(apiErrorMessage(checkout.body, 'Could not open payment. Refresh your order status and try again.'));
+      const paymentUrl = normalizePaymentUrl(extractPaymentUrl(checkout.body));
       const targetUrl = resolvePaymentTargetUrl(paymentUrl, {
         amount: Number.isFinite(amount) ? amount : 0,
         currency,
@@ -890,40 +846,6 @@ export default function DashboardPage() {
         orderId,
         draftId,
       });
-
-      // Keep pending snapshot so the dashboard can keep offering retry until paid.
-      const snapshot = {
-        order_id: orderId,
-        draft_id: draftId,
-        payment_url: targetUrl,
-        items:
-          pending?.items ??
-          unpaidOrder?.order_items?.map((item) => ({
-            bundle: {
-              name: item.bundle_name,
-              data_mb: item.data_amount ?? undefined,
-              validity_days: item.validity_days,
-              price: item.price,
-              currency: item.currency,
-            },
-            quantity: 1,
-          })),
-        trip: pending?.trip ?? {
-          countryName,
-          arrivalDate: unpaidOrder?.trip?.arrival_date,
-          departureDate: unpaidOrder?.trip?.departure_date,
-          duration: unpaidOrder?.trip?.duration_days,
-        },
-        simType,
-        country,
-        countryName,
-        total: Number.isFinite(amount) ? amount : pending?.total,
-        currency,
-        email,
-        createdAt: new Date().toISOString(),
-      };
-      localStorage.setItem('pendingPayment', JSON.stringify(snapshot));
-      setPendingPayment(snapshot);
 
       try {
         sessionStorage.setItem('travela:showReceiptPrompt', '1');
@@ -943,7 +865,7 @@ export default function DashboardPage() {
     } finally {
       setRetryPaying(false);paymentActionRef.current = false;
     }
-  }, [orders, pendingPayment, user?.email]);
+  }, [user?.email]);
 
   useEffect(() => {
     if (!topUpModalOpen) return;
@@ -1072,22 +994,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    const pending = readPendingPaymentFromStorage();
-    const storedPurchase = readLastPurchaseFromStorage();
-    setPendingPayment(pending);
-    if (storedPurchase) {
-      setPurchase(storedPurchase);
-    } else if (pending) {
-      setPurchase({
-        items: pending.items,
-        trip: pending.trip,
-        total: pending.total,
-        currency: pending.currency,
-        orderId: pending.order_id,
-        draftId: pending.draft_id,
-        simType: pending.simType,
-      });
-    }
+    // Remove legacy snapshots left by older releases; orders come from /me/orders.
+    localStorage.removeItem('pendingPayment');
+    localStorage.removeItem('lastPurchase');
     try {
       if (sessionStorage.getItem('travela:showReceiptPrompt') === '1') {
         setShowReceiptPrompt(true);
@@ -1121,7 +1030,7 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const refreshEsims = () => void loadEsims();
+    const refreshEsims = () => { void loadEsims(); void loadOrders(); };
     window.addEventListener('focus', refreshEsims);
     window.addEventListener('pageshow', refreshEsims);
     const refreshTimer = window.setInterval(() => {
@@ -1169,18 +1078,9 @@ export default function DashboardPage() {
           }
 
           const status = parseAssignmentStatus(statusRes.body);
-          const pendingPay = readPendingPaymentFromStorage();
-          const pendingOrderPaid = Boolean(
-            pendingPay?.order_id &&
-              ordersRef.current.some(
-                (o) => String(o.id) === String(pendingPay.order_id) && isPaidOrder(o)
-              )
-          );
-          // pendingPayment alone means checkout started — not that money cleared.
-          const justPaid = Boolean(getBalancePollContext() || pendingOrderPaid);
-          const isPhysicalPurchase =
-            pendingPay?.simType === 'physical' ||
-            hasPhysicalSimPurchase(ordersRef.current, pendingPay, purchaseRef.current);
+          const pendingOrderPaid = ordersRef.current.some(isPaidOrder);
+          const justPaid = pendingOrderPaid;
+          const isPhysicalPurchase = hasPhysicalSimPurchase(ordersRef.current);
 
           if (isPhysicalPurchase && !status.has_sim) {
             setWaitingForSim(false);
@@ -1222,7 +1122,6 @@ export default function DashboardPage() {
             applyAssignedSim(status.data);
             setWaitingForSim(false);
             localStorage.removeItem('pendingPayment');
-            setPendingPayment(null);
             if (justPaid) {
               const rechargeRes = await EsimsApi.register();
               if (signal.cancelled) return;
@@ -1257,7 +1156,6 @@ export default function DashboardPage() {
                 applyAssignedSim(assign.data);
                 setWaitingForSim(false);
                 localStorage.removeItem('pendingPayment');
-                setPendingPayment(null);
                 await loadEsims();
                 await loadOrders();
                 setAssignmentLoading(false);
@@ -1325,7 +1223,6 @@ export default function DashboardPage() {
       const cancelled = (result.body as {order?:{id?:number;status?:string;payment_status?:string;customer_cancelled_at?:string}} | null)?.order;
       if (!cancelled || String(cancelled.id)!==String(order.id) || cancelled.status!=='cancelled' || cancelled.payment_status!=='cancelled' || !cancelled.customer_cancelled_at) throw new Error('Could not confirm cancellation. Refresh the order status before trying again.');
       clearCancelledPayment(order,localStorage,sessionStorage);
-      setPendingPayment(readPendingPaymentFromStorage());setPurchase(readLastPurchaseFromStorage());
       if (receiptOrderId === String(order.id)) { setShowReceiptPrompt(false);setReceiptOrderId(null); }
       setOrders(current=>current.map(item=>item.id===order.id?{...item,status:'cancelled',payment_status:'cancelled',metadata:{...item.metadata,customer_cancelled_at:cancelled.customer_cancelled_at}}:item));
       setPaymentCancelNotice('The failed order was cancelled. You can choose a plan and start a new checkout.');
@@ -1333,9 +1230,8 @@ export default function DashboardPage() {
     finally { await loadOrders();paymentActionRef.current = false;setCancellingPayment(false); }
   };
   const latestUnpaidOrder = findLatestUnpaidOrder(orders);
-  const pendingNeedsPayment = shouldRetryPendingPayment(orders, pendingPayment);
   const incompletePaymentOrder = latestUnpaidOrder;
-  const needsPaymentRetry = Boolean(incompletePaymentOrder || pendingNeedsPayment);
+  const needsPaymentRetry = Boolean(incompletePaymentOrder);
   const incompletePaymentLabel = unpaidStatusLabel(
     incompletePaymentOrder?.payment_status || incompletePaymentOrder?.status || 'pending'
   );
@@ -1433,11 +1329,7 @@ export default function DashboardPage() {
     Boolean(latestPaidOrder && latestPaidOrder.metadata?.simType !== 'physical');
   const simTypeTitle = simTypeLabel(simType);
 
-  const physicalPickupDetails = resolvePhysicalPickupDetails(
-    orders,
-    pendingPayment,
-    purchase
-  );
+  const physicalPickupDetails = resolvePhysicalPickupDetails(orders);
   const isPhysicalSimAwaitingPickup =
     !hasActiveEsim && physicalPickupDetails != null;
 
@@ -1696,6 +1588,14 @@ export default function DashboardPage() {
       )}
 
       <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+        {ordersError && (
+          <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p>{ordersError}</p>
+            <button type="button" onClick={() => void loadOrders()} disabled={ordersLoading} className="mt-2 font-bold underline disabled:opacity-60">
+              {ordersLoading ? 'Refreshing…' : 'Retry loading orders'}
+            </button>
+          </div>
+        )}
         {rechargeNotice && (
           <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             <p>{rechargeNotice}</p>
@@ -1794,7 +1694,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {showReceiptPrompt && !needsPaymentRetry && (
+        {showReceiptPrompt && matchedReceiptOrder && !needsPaymentRetry && (
           <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
             <div
               className="px-5 py-4 flex items-start justify-between gap-3"
@@ -2532,7 +2432,7 @@ export default function DashboardPage() {
               </>
             )}
           </>
-        ) : isPhysicalSimAwaitingPickup || needsPaymentRetry ? null : (
+        ) : isPhysicalSimAwaitingPickup || needsPaymentRetry || ordersLoading || ordersError ? null : (
           /* Empty state */
           <div className="bg-white rounded-2xl border border-slate-100 p-10 text-center">
             <div
