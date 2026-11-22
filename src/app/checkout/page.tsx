@@ -935,7 +935,7 @@ export default function CheckoutPage() {
 
       <div className="max-w-3xl mx-auto px-4 py-8">
         {cart.simType === 'esim' && cart.checkoutMode !== 'topup' && !isTopUpFlow && <NewEsimNotice />}
-        <PartnerReferralField />
+        {step !== 'otp' && <PartnerReferralField />}
 
         {/* ── STEP 1: REGISTER ─────────────────────────────────────────── */}
         {step === 'register' && (
