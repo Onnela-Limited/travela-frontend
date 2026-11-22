@@ -50,9 +50,9 @@ async function mount({ saved = null, change } = {}) {
 test('pasting a full code applies it automatically with no Apply button', async () => {
   const ui = await mount();
   ui.edit(' trv-2lalhkyy ');
-  assert.deepEqual(ui.calls, ['TRV-2LALHKYY']);
+  assert.deepEqual(ui.calls, ['2LALHKYY']);
   await tick(); ui.render();
-  assert.match(ui.text(), /Referral code applied:.*TRV-2LALHKYY/);
+  assert.match(ui.text(), /Referral code applied:.*2LALHKYY/);
   assert.equal(ui.find(el => el.type === 'button' && el.props.children === 'Apply code'), undefined);
 });
 
@@ -62,12 +62,12 @@ test('typing applies only once the code is complete', async () => {
   assert.equal(ui.calls.length, 0);
   ui.edit('TRV-2LALHKYY');
   await tick(); ui.render();
-  assert.deepEqual(ui.calls, ['TRV-2LALHKYY']);
+  assert.deepEqual(ui.calls, ['2LALHKYY']);
 });
 
 test('codes saved by URL and QR links are displayed as applied without resubmission', async () => {
   const ui = await mount({ saved: 'TRV-2LALHKYY' });
-  assert.match(ui.text(), /Referral code applied:.*TRV-2LALHKYY/);
+  assert.match(ui.text(), /Referral code applied:.*2LALHKYY/);
   assert.equal(ui.calls.length, 0);
 });
 
@@ -87,9 +87,9 @@ test('failed automatic application keeps the entered code and Retry submits that
     return { referral: { code } };
   } });
   ui.edit('TRV-2LALHKYY'); await tick(); ui.render();
-  assert.equal(ui.find(el => el.type === 'input').props.value, 'TRV-2LALHKYY');
+  assert.equal(ui.find(el => el.type === 'input').props.value, '2LALHKYY');
   ui.find(el => el.type === 'button' && el.props.children === 'Retry').props.onClick();
   await tick(); ui.render();
-  assert.deepEqual(ui.calls, ['TRV-2LALHKYY','TRV-2LALHKYY']);
+  assert.deepEqual(ui.calls, ['2LALHKYY','2LALHKYY']);
   assert.match(ui.text(), /Referral code applied:/);
 });
