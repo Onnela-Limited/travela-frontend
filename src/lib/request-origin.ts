@@ -8,7 +8,15 @@ export function isSameOriginRequest(request: Pick<NextRequest, 'headers' | 'next
   try {
     const host = request.headers.get('host') ?? request.nextUrl.host;
     const expected = new URL(`${request.nextUrl.protocol}//${host}`);
-    if (expected.username || expected.password || expected.pathname !== '/' || expected.search || expected.hash) return false;
+    if (
+      expected.username ||
+      expected.password ||
+      expected.pathname !== '/' ||
+      expected.search ||
+      expected.hash
+    ) {
+      return false;
+    }
     return new URL(origin).origin === origin && origin === expected.origin;
   } catch {
     return false;

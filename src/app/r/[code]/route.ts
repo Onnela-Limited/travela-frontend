@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { normalizeReferral, REFERRAL_COOKIE, referralCookieOptions, resolveReferral } from '@/lib/referral-server';
+import {
+  normalizeReferral,
+  REFERRAL_COOKIE,
+  referralCookieOptions,
+  resolveReferral,
+} from '@/lib/referral-server';
 
 function bundlesRedirect(unavailable = false) {
   // A relative Location keeps the browser on its public origin. Behind Nginx,
@@ -13,7 +18,10 @@ function bundlesRedirect(unavailable = false) {
   });
 }
 
-export async function GET(_request: NextRequest, context: { params: Promise<{ code: string }> }) {
+export async function GET(
+  _request: NextRequest,
+  context: { params: Promise<{ code: string }> }
+) {
   const code = normalizeReferral((await context.params).code);
   if (!code) return bundlesRedirect(true);
   try {
@@ -22,6 +30,9 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ co
     if (valid) response.cookies.set(REFERRAL_COOKIE, valid, referralCookieOptions);
     return response;
   } catch {
-    return new NextResponse('We could not check this partner link. Please refresh and try again.', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    return new NextResponse(
+      'We could not check this partner link. Please refresh and try again.',
+      { status: 503, headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }

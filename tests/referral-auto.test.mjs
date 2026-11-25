@@ -52,7 +52,7 @@ test('pasting a full code applies it automatically with no Apply button', async 
   ui.edit(' trv-2lalhkyy ');
   assert.deepEqual(ui.calls, ['2LALHKYY']);
   await tick(); ui.render();
-  assert.match(ui.text(), /Referral code applied:.*2LALHKYY/);
+  assert.match(ui.text(), /Partner code saved.*2LALHKYY/);
   assert.equal(ui.find(el => el.type === 'button' && el.props.children === 'Apply code'), undefined);
 });
 
@@ -67,16 +67,19 @@ test('typing applies only once the code is complete', async () => {
 
 test('codes saved by URL and QR links are displayed as applied without resubmission', async () => {
   const ui = await mount({ saved: 'TRV-2LALHKYY' });
-  assert.match(ui.text(), /Referral code applied:.*2LALHKYY/);
+  assert.match(ui.text(), /Partner code saved.*2LALHKYY/);
   assert.equal(ui.calls.length, 0);
 });
 
-test('Remove and clearing the input remove the saved code', async () => {
+test('Change opens the saved code for editing, and Remove or clearing the input removes it', async () => {
   for (const clear of [ui => ui.edit(''), ui => ui.find(el => el.type === 'button' && el.props.children === 'Remove').props.onClick()]) {
-    const ui = await mount({ saved: 'TRV-2LALHKYY' }); clear(ui);
+    const ui = await mount({ saved: 'TRV-2LALHKYY' });
+    ui.find(el => el.type === 'button' && el.props.children === 'Change').props.onClick();
+    ui.render();
+    clear(ui);
     await tick(); ui.render();
     assert.deepEqual(ui.calls, [null]);
-    assert.doesNotMatch(ui.text(), /Referral code applied:/);
+    assert.doesNotMatch(ui.text(), /Partner code saved/);
   }
 });
 
@@ -91,5 +94,5 @@ test('failed automatic application keeps the entered code and Retry submits that
   ui.find(el => el.type === 'button' && el.props.children === 'Retry').props.onClick();
   await tick(); ui.render();
   assert.deepEqual(ui.calls, ['2LALHKYY','2LALHKYY']);
-  assert.match(ui.text(), /Referral code applied:/);
+  assert.match(ui.text(), /Partner code saved/);
 });

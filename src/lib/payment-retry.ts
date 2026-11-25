@@ -11,7 +11,7 @@ export interface PaymentRetryOrder {
   metadata?: { simType?: string; checkoutMode?: string; country?: string; customer_cancelled_at?: string } | null;
   trip?: { destination_country?: string; arrival_date?: string; departure_date?: string } | null;
   order_items?: Array<{
-    bundle_id?: number;
+    bundle_id?: number | string | null;
     bundle_name?: string;
     bundle?: { id?: number; name?: string } | null;
     data_amount?: number | null;
@@ -54,7 +54,7 @@ function samePurchase(a: PaymentRetryOrder, b: PaymentRetryOrder): boolean {
       const id = item.bundle_id ?? item.bundle?.id;
       const otherId = other.bundle_id ?? other.bundle?.id;
       if (id != null && otherId != null) {
-        if (id !== otherId) return false;
+        if (String(id) !== String(otherId)) return false;
       } else {
         const name = normalized(item.bundle_name || item.bundle?.name);
         if (!name || name !== normalized(other.bundle_name || other.bundle?.name)) return false;
@@ -79,7 +79,10 @@ export function hasSuccessfulReplacement(order: PaymentRetryOrder, orders: Payme
   });
 }
 
-export function findLatestUnpaidOrder<T extends PaymentRetryOrder>(orders: T[]): T | null {
-  return orders.filter((order) => isUnpaidPayableOrder(order) && !hasSuccessfulReplacement(order, orders))
+export function findLatestUnpaidOrder<T extends PaymentRetryOrder>(
+  orders: T[], dismissedIds?: ReadonlySet<string>
+): T | null {
+  return orders.filter((order) => !dismissedIds?.has(String(order.id)) &&
+    isUnpaidPayableOrder(order) && !hasSuccessfulReplacement(order, orders))
     .sort((a, b) => (Date.parse(b.created_at || '') || b.id) - (Date.parse(a.created_at || '') || a.id))[0] ?? null;
 }
