@@ -29,6 +29,11 @@ export type ApiBundle = {
 
 export type BundlesResponse = { bundles: ApiBundle[] };
 
+/** Older catalogs may omit active; explicitly disabled plans cannot be purchased. */
+export function isPurchasableBundle(bundle: { active?: boolean }): boolean {
+  return bundle.active !== false;
+}
+
 export function toMb(bundle: ApiBundle): number | undefined {
   if (typeof bundle.data_mb === 'number') return bundle.data_mb;
   if (typeof bundle.bundle_size_in_mb === 'number') return bundle.bundle_size_in_mb;
@@ -88,7 +93,7 @@ export function displayBundleName(name?: string | null): string {
 }
 
 export function mapApiBundles(apiBundles: ApiBundle[]): Bundle[] {
-  return apiBundles.map((b) => {
+  return apiBundles.filter(isPurchasableBundle).map((b) => {
     const dataMb = toMb(b);
     return {
       id: b.id,

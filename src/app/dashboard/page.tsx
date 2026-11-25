@@ -16,7 +16,7 @@ import {
 import { useAuth } from '@/lib/auth-context';
 import { findLatestUnpaidOrder, isPaidOrder, canCancelFailedOrder } from '@/lib/payment-retry';
 import { PLAN_VALIDITY_DAYS, plannedExpiryDate, hasPlanExpired, activationToday } from '@/lib/plan-validity';
-import { displayBundleName } from '@/lib/bundles';
+import { displayBundleName, isPurchasableBundle } from '@/lib/bundles';
 import { dataMbFromAssignment } from '@/lib/esim-balance';
 import { checkoutForSim, checkoutSimRows } from '@/lib/checkout-sim';
 import { resolvePaymentTargetUrl, extractPaymentUrl, normalizePaymentUrl } from '@/lib/payment';
@@ -197,6 +197,7 @@ interface TopUpBundle {
 
 type ApiBundle = {
   id: number;
+  active?: boolean;
   sim_bundle_id?: number | null;
   name: string;
   alias?: string | null;
@@ -877,7 +878,7 @@ export default function DashboardPage() {
       try {
         const res = await BundlesApi.list<BundlesResponse>();
         const apiBundles = res.data?.bundles ?? [];
-        const uiBundles: TopUpBundle[] = apiBundles.map((b) => {
+        const uiBundles: TopUpBundle[] = apiBundles.filter(isPurchasableBundle).map((b) => {
             const dataMb = bundleToMb(b);
             return {
               id: b.id,
@@ -1116,6 +1117,15 @@ export default function DashboardPage() {
             setWaitingForSim(status.status === 'activation_pending');
             setAssignmentLoading(false);
             return;
+          }
+
+          if (status.status === 'activation_pending') {
+            setWaitingForSim(true);
+            setAssignmentLoading(false);
+            // The server prepares the number asynchronously. Keep watching until
+            // it reports an assignment instead of leaving the dashboard stuck.
+            await sleep(Math.max(1, Math.min(status.retry_after_seconds ?? 5, 30)) * 1000, signal);
+            continue;
           }
 
           if (status.has_sim) {
